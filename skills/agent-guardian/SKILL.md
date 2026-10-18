@@ -15,7 +15,7 @@ The Agent Skill and Guardian runtime are separate. Installing this skill does no
 
 ## Power protection
 
-Only start a Guardian lease when the user asks to protect an unattended task or approves the lease. Run guardian doctor first. Prefer AC power. Use guardian start --pid <PID> --ttl-minutes <MINUTES> when the target process is known, and state the selected process and expiry. The lease must remain bounded. The display is allowed to turn off. Tell the user how to stop the foreground command with Ctrl+C.
+Only start a Guardian lease when the user asks to protect an unattended task or approves the lease. Run guardian doctor first. Prefer AC power. Use guardian start --pid <PID> --ttl-minutes <MINUTES> when the target process is known, and state the selected process and expiry. Guardian accepts only processes owned by the same Windows user and running in Guardian's session. The lease must remain bounded. The display is allowed to turn off. Tell the user how to stop the foreground command with Ctrl+C.
 
 Guardian cannot override a user-requested sleep, shutdown, restart, critical battery behavior, or Windows policy. Do not claim that Win+L behavior or a hardware sleep model is verified unless the local diagnostics and hardware test evidence say so.
 

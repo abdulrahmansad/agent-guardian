@@ -9,7 +9,7 @@ The skill can be installed independently with the Skills CLI. No public runtime 
 ## Available development commands
 
 - guardian doctor: read-only Windows power, battery, and sleep-state diagnostics.
-- guardian status: show the Windows powercfg /requests output; this may require an elevated shell.
+- guardian status: query Windows `powercfg /requests` status with requestor names, process IDs, and paths redacted; this may require an elevated shell.
 - guardian network: report local Wi-Fi adapter state, gateway presence, and a tunnel-type hint without network probes or changes.
 - guardian monitor: foreground, read-only listener for local IP-interface and route changes; exits after at most 60 minutes (default), refreshes aggregate snapshots on notifications and every five minutes by default, and emits newline-delimited JSON with `--json`. It does not send probes, perform recovery, or log network events.
 - guardian network --probe: explicitly run bounded DNS lookups, active default-route inspection, gateway ICMP checks, and two fixed one-shot web checks through Windows automatic proxy settings. The command shows a conservative classification; results do not authorize recovery.
@@ -17,7 +17,7 @@ The skill can be installed independently with the Skills CLI. No public runtime 
 - guardian logs: show typed power lease events and explicit reconnect outcomes from separate local journals; `--json` emits structured events. Pass `--config PATH` to select a custom config.
 - guardian report: summarize the latest power session and include reconnect outcomes whose timestamps fall inside that session's interval. `--output PATH` writes JSON without overwriting an existing path. Pass `--config PATH` to select a custom config.
 - guardian start: hold a foreground lease on Guardian's own process for the configured default duration (60 minutes by default).
-- guardian start --pid PID --ttl-minutes MINUTES: bind a lease to a target process and a bounded duration. The configured maximum remains enforced.
+- guardian start --pid PID --ttl-minutes MINUTES: bind a lease to a target process owned by the same Windows user and running in Guardian's session. Other users' processes and processes in a different session are refused. The configured maximum remains enforced.
 - guardian start --allow-battery: permit a battery or unknown-power-source lease, capped at five minutes.
 - Guardian reads `%LOCALAPPDATA%\AgentGuardian\config.toml` when present. `--config PATH` overrides that location; it never creates a config file.
 - guardian version: print the runtime version.

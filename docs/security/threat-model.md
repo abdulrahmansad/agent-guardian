@@ -1,6 +1,6 @@
 # Initial threat model
 
-Last reviewed: 2026-10-18. This is an initial design document, not a completed security audit.
+Last reviewed: 2026-10-19. This is an initial design document, not a completed security audit.
 
 ## Assets
 
@@ -23,16 +23,17 @@ Last reviewed: 2026-10-18. This is an initial design document, not a completed s
 
 | Abuse case | Impact | Initial control / release gate |
 |---|---|---|
-| PID reuse or spoofed PID | A lease protects the wrong lifetime or lasts indefinitely | Open process handle, capture creation time and owner/session, verify signaling, enforce a bounded TTL; no PID-only lease |
+| PID reuse, spoofed PID, or cross-session target | A lease protects the wrong lifetime or another user's session | Open a process handle, capture creation time, require the target token's user SID and session to match Guardian, verify signaling, and enforce a bounded TTL; no PID-only lease |
+| Sensitive power-request diagnostics | Process names or paths leak through Windows command output | Suppress `/requests` stdout and stderr; report only query availability and a generic redacted success message |
 | Stale lease after crash/restart | Unwanted permanent wake protection | Volatile leases initially; scoped request handle closes on process exit; never restore leases blindly |
 | Agent requests excessive wake time | Battery drain / denial of sleep | Validate TTL and count in runtime; default AC-only or explicit battery policy; clear on expiry/exit |
 | Recovery loop on GitHub/OpenAI/ISP outage | User loses healthy local Wi-Fi | Independent evidence, conservative UNKNOWN state, pure planner, strict rate limit; no adapter restart on remote-only failures |
 | Malicious profile/interface string | Command injection or wrong adapter mutation | Avoid shell-based mutations; use typed native APIs and validated identities if recovery is ever enabled |
 | Malicious IPC client | Unauthorized lease/recovery or privilege escalation | No IPC/service in first slice; future named pipe requires explicit DACL, local-only semantics, caller token validation, bounded schema, server-side quotas |
 | Log injection or secret leakage | Misleading reports / disclosure | Power logs contain typed lease events; the separate network log contains an event UUID, timestamp, and typed reconnect result. Neither accepts arbitrary summary text, process IDs, network names, addresses, or credentials; both are size/retention bounded |
-| Malicious config / path / reparse point | Unsafe limits or arbitrary file access | Configuration input is read-only, limited to 64 KiB, rejects unknown fields, and validates ranges. The event store rejects symlinked log files and a symlinked leaf directory. Ancestor reparse-point/race handling remains for dedicated review |
+| Malicious config / path / reparse point | Unsafe limits or arbitrary file access | Configuration input is read-only, limited to 64 KiB, rejects unknown fields, and validates ranges. The event store rejects symlinked log files and a symlinked leaf directory; complete ancestor reparse-point and race defenses remain future hardening |
 | Compromised artifact or update | Arbitrary code execution | No auto-update or remote download path. The per-user installer hashes the running executable against a caller-supplied digest, stages and rechecks the copy, and replaces only the fixed Guardian executable. The digest does not authenticate its publisher; the user must obtain it from a trusted release channel. No public artifact/checksum is available yet |
-| Reparse-point or path substitution during install | Writes outside the intended per-user install directory | Fixed destination names under `%LOCALAPPDATA%\Programs\AgentGuardian`; source, destination, and install directories are checked for reparse points, staging uses create-new in the destination directory, and the closed staged file is rechecked and rehashed before replacement. Uninstall also compares Windows file identity to refuse deleting a hard-link alias of the running executable. Same-user concurrent filesystem tampering and ancestor-path races remain a security-review item; the installer does not elevate |
+| Reparse-point or path substitution during install | Writes outside the intended per-user install directory | Fixed destination names under `%LOCALAPPDATA%\Programs\AgentGuardian`; source, destination, and install directories are checked for reparse points, staging uses create-new in the destination directory, and the closed staged file is rechecked and rehashed before replacement. Uninstall also compares Windows file identity to refuse deleting a hard-link alias of the running executable. A 2026-10-19 focused re-review confirmed that same-user concurrent filesystem tampering and ancestor-path races remain possible within the user's writable filesystem; no privilege escalation was found. A robust mitigation requires handle-relative file operations. The installer does not elevate |
 
 ## Initial security posture
 

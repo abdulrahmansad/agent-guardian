@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::windows::ffi::OsStringExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use guardian_core::{
@@ -20,6 +20,10 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+use windows_sys::Win32::Security::{
+    EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenSessionId, TokenUser,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
 mod install;
 mod monitor;
@@ -31,6 +35,7 @@ const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const WAIT_OBJECT_0: u32 = 0;
 const WAIT_TIMEOUT: u32 = 0x102;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const POWER_REQUEST_SYSTEM_REQUIRED: i32 = 1;
 const BATTERY_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(10);
@@ -102,6 +107,140 @@ unsafe extern "system" {
 
 struct ProcessHandle(Handle);
 
+struct TokenHandle(Handle);
+
+impl TokenHandle {
+    fn open(process: Handle) -> Result<Self, String> {
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(format!(
+                "could not verify process owner and session (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if token.is_null() || token as isize == -1 {
+            return Err("Windows returned an invalid process token handle".into());
+        }
+        Ok(Self(token))
+    }
+
+    fn user_buffer(&self) -> Result<Vec<usize>, String> {
+        let mut required_bytes = 0;
+        let first_result = unsafe {
+            GetTokenInformation(
+                self.0,
+                TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &mut required_bytes,
+            )
+        };
+        if first_result == 0
+            && (required_bytes == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER)
+        {
+            return Err(format!(
+                "could not query process owner (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if required_bytes == 0 || required_bytes > 64 * 1024 {
+            return Err("Windows returned an invalid process-owner buffer size".into());
+        }
+        let word_count = (required_bytes as usize).div_ceil(std::mem::size_of::<usize>());
+        let mut buffer = vec![0_usize; word_count];
+        let mut returned_bytes = 0;
+        if unsafe {
+            GetTokenInformation(
+                self.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * std::mem::size_of::<usize>()) as u32,
+                &mut returned_bytes,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "could not query process owner (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if returned_bytes < std::mem::size_of::<TOKEN_USER>() as u32 {
+            return Err("Windows returned incomplete process-owner information".into());
+        }
+        Ok(buffer)
+    }
+
+    fn session_id(&self) -> Result<u32, String> {
+        let mut session_id = 0_u32;
+        let mut returned_bytes = 0;
+        if unsafe {
+            GetTokenInformation(
+                self.0,
+                TokenSessionId,
+                (&mut session_id as *mut u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+                &mut returned_bytes,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "could not query process session (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if returned_bytes != std::mem::size_of::<u32>() as u32 {
+            return Err("Windows returned incomplete process-session information".into());
+        }
+        Ok(session_id)
+    }
+}
+
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+fn token_user_sid(buffer: &[usize]) -> Result<*mut c_void, String> {
+    let token_user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
+    if token_user.User.Sid.is_null() {
+        return Err("Windows returned an invalid process-owner SID".into());
+    }
+    Ok(token_user.User.Sid)
+}
+
+fn validate_process_context(
+    same_user: bool,
+    target_session_id: u32,
+    current_session_id: u32,
+) -> Result<(), String> {
+    if same_user && target_session_id == current_session_id {
+        Ok(())
+    } else {
+        Err("target process must belong to the current Windows user and session".into())
+    }
+}
+
+fn verify_process_owner_and_session(target_process: Handle) -> Result<(), String> {
+    let target_token = TokenHandle::open(target_process)?;
+    let current_token = TokenHandle::open(unsafe { GetCurrentProcess() })?;
+    let target_user = target_token.user_buffer()?;
+    let current_user = current_token.user_buffer()?;
+    let same_user = unsafe {
+        EqualSid(
+            token_user_sid(&target_user)?,
+            token_user_sid(&current_user)?,
+        ) != 0
+    };
+    validate_process_context(
+        same_user,
+        target_token.session_id()?,
+        current_token.session_id()?,
+    )
+}
+
 impl ProcessHandle {
     fn open(process_id: u32) -> Result<(Self, u64), String> {
         let handle = unsafe {
@@ -131,6 +270,7 @@ impl ProcessHandle {
             ));
         }
         let created = (u64::from(creation.high) << 32) | u64::from(creation.low);
+        verify_process_owner_and_session(process.0)?;
         Ok((process, created))
     }
 
@@ -389,26 +529,39 @@ fn event_store_at(config: &Config, filename: &str) -> Result<EventStore, String>
 
 pub fn powercfg(arguments: &[&str]) -> Result<String, String> {
     let executable = system_directory()?.join("powercfg.exe");
+    if arguments == ["/requests"] {
+        let status = Command::new(&executable)
+            .args(arguments)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("could not run {}: {error}", executable.display()))?;
+        if !status.success() {
+            return Err(format!(
+                "powercfg {} exited with {} (command output suppressed)",
+                arguments.join(" "),
+                status
+            ));
+        }
+        return Ok(redacted_power_request_output().into());
+    }
+
     let output = Command::new(&executable)
         .args(arguments)
         .output()
         .map_err(|error| format!("could not run {}: {error}", executable.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
-        let detail = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
         return Err(format!(
-            "powercfg {} exited with {}: {}",
+            "powercfg {} exited with {} (command output suppressed)",
             arguments.join(" "),
-            output.status,
-            detail
+            output.status
         ));
     }
-    Ok(stdout.into_owned())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn redacted_power_request_output() -> &'static str {
+    "Power request query completed; requestor details were redacted.\n"
 }
 
 fn system_directory() -> Result<PathBuf, String> {
@@ -445,7 +598,8 @@ pub fn doctor(json: bool) -> Result<(), String> {
             "power_source": power_source,
             "battery_percent": (power.battery_life_percent != 255).then_some(power.battery_life_percent),
             "available_sleep_states": available_sleep_states.as_ref().ok(),
-            "active_power_requests": active_requests.as_ref().ok(),
+            "power_request_query_available": active_requests.is_ok(),
+            "power_request_details_redacted": true,
             "diagnostic_warnings": warnings,
             "locked_session_verified": false,
             "network_recovery_enabled": false
@@ -468,7 +622,7 @@ pub fn doctor(json: bool) -> Result<(), String> {
             Err(error) => println!("Unavailable: {error}"),
         }
         println!();
-        println!("Active power requests (powercfg /requests):");
+        println!("Active power request diagnostics (powercfg /requests):");
         match &active_requests {
             Ok(output) => print!("{output}"),
             Err(error) => println!("Unavailable: {error}"),
@@ -827,21 +981,75 @@ struct LocalNetworkSnapshot {
 }
 
 fn local_network_snapshot() -> Result<LocalNetworkSnapshot, String> {
-    let adapters = get_adapter_addresses()?;
-    let observations = adapters.iter().map(|adapter| LocalAdapterObservation {
-        is_wifi: adapter.IfType == IF_TYPE_IEEE80211,
-        is_tunnel: adapter.IfType == IF_TYPE_TUNNEL,
-        operational: adapter.OperStatus == IfOperStatusUp,
-        default_gateway_reported: !adapter.FirstGatewayAddress.is_null(),
-    });
     let snapshot = LocalNetworkSnapshot {
-        summary: LocalNetworkSummary::from_adapters(observations),
+        summary: LocalNetworkSummary::from_adapters(get_adapter_observations()?),
         ..LocalNetworkSnapshot::default()
     };
     Ok(snapshot)
 }
 
-fn get_adapter_addresses() -> Result<Vec<IP_ADAPTER_ADDRESSES_LH>, String> {
+fn adapter_observations(
+    buffer: &[IP_ADAPTER_ADDRESSES_LH],
+) -> Result<Vec<LocalAdapterObservation>, String> {
+    if buffer.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = buffer.as_ptr() as usize;
+    let buffer_bytes = buffer
+        .len()
+        .checked_mul(std::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>())
+        .ok_or_else(|| "network adapter buffer size overflowed".to_string())?;
+    let end = base
+        .checked_add(buffer_bytes)
+        .ok_or_else(|| "network adapter buffer address overflowed".to_string())?;
+    let mut current = buffer.as_ptr();
+    let mut observations = Vec::new();
+    let mut visited = 0_usize;
+    let minimum_length = std::mem::offset_of!(IP_ADAPTER_ADDRESSES_LH, FirstGatewayAddress)
+        + std::mem::size_of::<*mut c_void>();
+    let maximum_nodes = buffer_bytes / minimum_length;
+
+    while !current.is_null() {
+        let address = current as usize;
+        if address < base
+            || address
+                .checked_add(minimum_length)
+                .is_none_or(|minimum_end| minimum_end > end)
+            || !(address - base).is_multiple_of(std::mem::align_of::<IP_ADAPTER_ADDRESSES_LH>())
+        {
+            return Err("Windows returned an invalid network adapter list pointer".into());
+        }
+
+        let length =
+            unsafe { std::ptr::addr_of!((*current).Anonymous1.Anonymous.Length).read() } as usize;
+        if length < minimum_length
+            || address
+                .checked_add(length)
+                .is_none_or(|node_end| node_end > end)
+        {
+            return Err("Windows returned an incomplete network adapter record".into());
+        }
+        let if_type = unsafe { std::ptr::addr_of!((*current).IfType).read() };
+        let operational_status = unsafe { std::ptr::addr_of!((*current).OperStatus).read() };
+        let has_default_gateway =
+            !unsafe { std::ptr::addr_of!((*current).FirstGatewayAddress).read() }.is_null();
+        observations.push(LocalAdapterObservation {
+            is_wifi: if_type == IF_TYPE_IEEE80211,
+            is_tunnel: if_type == IF_TYPE_TUNNEL,
+            operational: operational_status == IfOperStatusUp,
+            default_gateway_reported: has_default_gateway,
+        });
+        current = unsafe { std::ptr::addr_of!((*current).Next).read() };
+        visited += 1;
+        if visited > maximum_nodes {
+            return Err("Windows returned a cyclic network adapter list".into());
+        }
+    }
+
+    Ok(observations)
+}
+
+fn get_adapter_observations() -> Result<Vec<LocalAdapterObservation>, String> {
     let flags = GAA_FLAG_INCLUDE_GATEWAYS
         | GAA_FLAG_SKIP_ANYCAST
         | GAA_FLAG_SKIP_DNS_SERVER
@@ -868,7 +1076,7 @@ fn get_adapter_addresses() -> Result<Vec<IP_ADAPTER_ADDRESSES_LH>, String> {
             )
         };
         if result == 0 {
-            return Ok(adapters);
+            return adapter_observations(&adapters);
         }
         if result == ERROR_NO_DATA {
             return Ok(Vec::new());
@@ -915,6 +1123,77 @@ fn gateway_label(reachable: Option<bool>) -> &'static str {
         Some(true) => "confirmed",
         Some(false) => "unreachable",
         None => "not confirmed (ICMP may be filtered)",
+    }
+}
+
+#[cfg(test)]
+mod windows_safety_tests {
+    use super::*;
+
+    fn adapter_record() -> IP_ADAPTER_ADDRESSES_LH {
+        let mut adapter = IP_ADAPTER_ADDRESSES_LH::default();
+        adapter.Anonymous1.Anonymous.Length = std::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>() as u32;
+        adapter
+    }
+
+    #[test]
+    fn power_request_diagnostic_discards_owner_details() {
+        let message = redacted_power_request_output();
+        assert!(message.contains("redacted"));
+        assert!(!message.contains("PID"));
+        assert!(!message.contains("C:\\Users\\"));
+    }
+
+    #[test]
+    fn adapter_summary_follows_only_linked_records() {
+        let mut adapters = vec![adapter_record(), adapter_record(), adapter_record()];
+        adapters[0].IfType = IF_TYPE_IEEE80211;
+        adapters[0].OperStatus = IfOperStatusUp;
+        adapters[0].FirstGatewayAddress = std::ptr::NonNull::<
+            windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_GATEWAY_ADDRESS_LH,
+        >::dangling()
+        .as_ptr();
+        adapters[1].IfType = IF_TYPE_IEEE80211;
+        adapters[1].OperStatus = IfOperStatusUp;
+        unsafe {
+            let base = adapters.as_mut_ptr();
+            (*base).Next = base.add(2);
+            (*base.add(2)).Next = std::ptr::null_mut();
+        }
+
+        let observations = adapter_observations(&adapters).unwrap();
+        assert_eq!(observations.len(), 2);
+        assert!(observations[0].is_wifi);
+        assert!(observations[0].operational);
+        assert!(observations[0].default_gateway_reported);
+        assert!(!observations[1].is_wifi);
+    }
+
+    #[test]
+    fn adapter_summary_rejects_invalid_and_cyclic_links() {
+        let mut adapter = adapter_record();
+        let adapter_ptr = &mut adapter as *mut IP_ADAPTER_ADDRESSES_LH;
+        unsafe {
+            (*adapter_ptr).Next = std::ptr::NonNull::<IP_ADAPTER_ADDRESSES_LH>::dangling().as_ptr();
+        }
+        assert!(adapter_observations(std::slice::from_ref(&adapter)).is_err());
+
+        let mut adapters = vec![adapter_record()];
+        adapters[0].Next = adapters.as_mut_ptr();
+        assert!(adapter_observations(&adapters).is_err());
+    }
+
+    #[test]
+    fn target_process_must_share_current_owner_and_session() {
+        assert!(validate_process_context(true, 7, 7).is_ok());
+        assert!(validate_process_context(false, 7, 7).is_err());
+        assert!(validate_process_context(true, 8, 7).is_err());
+    }
+
+    #[test]
+    fn current_process_context_can_be_verified() {
+        let process_id = unsafe { GetCurrentProcessId() };
+        assert!(ProcessHandle::open(process_id).is_ok());
     }
 }
 

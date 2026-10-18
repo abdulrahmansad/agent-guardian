@@ -4,6 +4,7 @@ This project follows Semantic Versioning once public releases begin. Unreleased 
 
 ## Unreleased
 
+- Redacted all `powercfg /requests` command output, followed and validated the Windows adapter linked list, and restricted PID-bound power leases to processes owned by the same user and session.
 - Added a per-user Windows runtime install and upgrade command that verifies a supplied SHA-256 and stages the executable in `%LOCALAPPDATA%` without elevation, PATH changes, startup registration, or service installation.
 - Added an uninstall command that removes only the Guardian executable and preserves configuration and logs. It refuses to remove the currently running executable.
 - Added Windows installer tests for checksum failure, staged rehash, upgrade, uninstall scope, non-ASCII paths, and same-path/hard-link self-uninstall guard logic.

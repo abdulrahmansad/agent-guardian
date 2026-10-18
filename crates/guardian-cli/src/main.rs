@@ -28,7 +28,7 @@ struct Args {
 enum Command {
     /// Hold a foreground power lease until the target process exits or the lease expires.
     Start {
-        /// Bind the lease to this process. Defaults to this Guardian process.
+        /// Bind the lease to a process in this Windows user and session. Defaults to Guardian itself.
         #[arg(long)]
         pid: Option<u32>,
         /// Maximum lease duration (1 to 1440 minutes).
@@ -41,7 +41,7 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Show current Windows power requests and available sleep states.
+    /// Query Windows power-request status with requestor details redacted.
     Status,
     /// Read-only environment and power diagnostics.
     Doctor,
