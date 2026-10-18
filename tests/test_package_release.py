@@ -113,6 +113,11 @@ class PackageReleaseTests(unittest.TestCase):
 
         package_release(self.binary, self.root, self.root / "dist")
 
+    def test_native_wifi_api_is_a_windows_system_dependency(self) -> None:
+        self.binary.write_bytes(synthetic_pe(0x8664, import_name="wlanapi.dll"))
+
+        package_release(self.binary, self.root, self.root / "dist")
+
 
 if __name__ == "__main__":
     unittest.main()

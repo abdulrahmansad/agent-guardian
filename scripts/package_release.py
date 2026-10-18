@@ -49,6 +49,7 @@ WINDOWS_SYSTEM_DLLS = {
     "wininet.dll",
     "winmm.dll",
     "wintrust.dll",
+    "wlanapi.dll",
     "ws2_32.dll",
 }
 
