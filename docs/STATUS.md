@@ -1,6 +1,6 @@
 # Development status
 
-Last updated: 2026-10-18
+Last updated: 2026-10-19
 
 This is the source-of-truth checklist for the Agent Guardian master goal. Automated policy tests and read-only command smoke tests do not establish physical Windows power behavior or safe live network recovery.
 
@@ -55,11 +55,14 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] The docs link checker covered 19 Markdown files; official Agent Skills validation passed; local Skills CLI discovery found one skill; `cargo package --workspace --no-verify --allow-dirty` packaged both crates; `cargo audit` scanned 66 locked dependencies without advisories.
 - [x] The Python package tests passed and verified deterministic ZIP output, executable architecture validation, and rejection of non-system DLLs in both normal and delay-load import tables.
 - [x] Final local validation for this slice: formatting, Clippy, 23 CLI/Windows tests, 38 core tests, five release-packager tests, 22-file Markdown link checking, Agent Skills validation, local Skills CLI discovery, crate packaging, and `cargo audit` over 66 dependencies passed. The real MSVC build/package step is now in CI but has not run on the hosted workflow.
+- [x] Installed the skill with the Skills CLI into a disposable Codex project using copy mode, then listed it successfully. The temporary project was removed; no user profile or repository skill directory was changed.
+- [x] Measured ten launches of the optimized local GNU/LLVM build's `--version` command: 21.04 ms median, 17.28–471.40 ms range. This is a local development-host sample, not a release performance claim.
 
 ## In progress
 
 - [ ] Validate the CI dependency/security and documentation checks on a hosted Windows runner.
 - [ ] Complete an install/upgrade/removal audit in a clean-user Windows VM using a release executable and independently trusted checksum.
+- [ ] Repeat CPU and memory measurements for the foreground monitor on an awake host; the attempted capture did not produce a valid continuous sample.
 
 ## Remaining work
 
@@ -82,6 +85,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - The installer rechecks and rehashes its closed staging file and compares Windows file identity to avoid self-uninstall through a hard link. A focused review recorded same-user concurrent filesystem tampering and ancestor-path races as residual limitations; the installer does not elevate, but these remain in the full pre-release security review. A supplied digest does not authenticate the artifact publisher.
 - The CI workflow has not run on GitHub. The repository remote has no refs, so hosted CI and public Skills CLI install cannot be verified.
 - The Rust 1.89 local cross-check could not link Windows GNU build scripts because the available LLVM-MinGW runtime lacks GCC support libraries; the workflow's 1.89 MSVC check is the authoritative remaining MSRV validation and has not run on GitHub.
+- A monitor resource capture configured for 60 seconds exited successfully but the measuring process reported 18,494.7 seconds elapsed. The host may have been suspended or delayed; discard its CPU result and do not use its sparse memory samples as a baseline.
 - The local optimized GNU/LLVM executable imports `libunwind.dll`; launching it requires the LLVM-MinGW runtime on `PATH`, and the current installer copies only `guardian.exe`. The release packager correctly rejects this binary. The MSVC artifact has not yet been built or exercised, and the static/delay-load import screen cannot detect dynamic DLL loading.
 - No actual locked-session, Modern Standby/S3 sleep, battery, live Wi-Fi recovery, real-profile installer, clean-user installer, or real-agent integration acceptance run has been performed. Installer file operations were tested in disposable directories.
 
