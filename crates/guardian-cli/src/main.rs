@@ -88,7 +88,7 @@ enum Command {
     },
     /// Remove the per-user runtime executable without deleting local data.
     Uninstall,
-    /// Not available while Guardian runs in the foreground; stop it with Ctrl+C in its terminal.
+    /// Stop active foreground power leases in this Windows user session.
     Stop,
     /// Show the Guardian version.
     Version,
@@ -101,7 +101,12 @@ fn main() -> ExitCode {
             println!("guardian {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Command::Start { pid, ttl_minutes, allow_battery, config: config_path } => {
+        Command::Start {
+            pid,
+            ttl_minutes,
+            allow_battery,
+            config: config_path,
+        } => {
             let config = match load_config(config_path.as_deref()) {
                 Ok(config) => config,
                 Err(error) => return report_error(error),
@@ -116,14 +121,28 @@ fn main() -> ExitCode {
                 ))
             } else {
                 #[cfg(windows)]
-                { windows::start(pid, ttl_minutes, allow_battery || config.power.allow_on_battery, config) }
+                {
+                    windows::start(
+                        pid,
+                        ttl_minutes,
+                        allow_battery || config.power.allow_on_battery,
+                        config,
+                    )
+                }
                 #[cfg(not(windows))]
-                { let _ = (pid, allow_battery, config); Err("guardian start is supported only on Windows".into()) }
+                {
+                    let _ = (pid, allow_battery, config);
+                    Err("guardian start is supported only on Windows".into())
+                }
             }
         }
         Command::Status => platform_diagnostic("requests"),
         Command::Doctor => platform_doctor(args.json),
-        Command::Network { probe, reconnect_saved_wifi, config: config_path } => {
+        Command::Network {
+            probe,
+            reconnect_saved_wifi,
+            config: config_path,
+        } => {
             let config = if config_path.is_some() || reconnect_saved_wifi {
                 match load_config(config_path.as_deref()) {
                     Ok(config) => config,
@@ -134,7 +153,10 @@ fn main() -> ExitCode {
             };
             platform_network(args.json, probe, reconnect_saved_wifi, config)
         }
-        Command::Monitor { duration_minutes, interval_seconds } => {
+        Command::Monitor {
+            duration_minutes,
+            interval_seconds,
+        } => {
             let duration_minutes = duration_minutes.unwrap_or(60);
             let interval_seconds = interval_seconds.unwrap_or(300);
             match validate_monitor_options(duration_minutes, interval_seconds) {
@@ -146,17 +168,37 @@ fn main() -> ExitCode {
         Command::Report { output, config } => platform_report(output, args.json, config),
         Command::Install { sha256 } => {
             #[cfg(windows)]
-            { windows::install(args.json, &sha256) }
+            {
+                windows::install(args.json, &sha256)
+            }
             #[cfg(not(windows))]
-            { let _ = (args.json, sha256); Err("guardian install is supported only on Windows".into()) }
+            {
+                let _ = (args.json, sha256);
+                Err("guardian install is supported only on Windows".into())
+            }
         }
         Command::Uninstall => {
             #[cfg(windows)]
-            { windows::uninstall(args.json) }
+            {
+                windows::uninstall(args.json)
+            }
             #[cfg(not(windows))]
-            { let _ = args.json; Err("guardian uninstall is supported only on Windows".into()) }
+            {
+                let _ = args.json;
+                Err("guardian uninstall is supported only on Windows".into())
+            }
         }
-        Command::Stop => Err("Guardian runs in the foreground in this development build. Press Ctrl+C in its owning terminal to release the lease.".into()),
+        Command::Stop => {
+            #[cfg(windows)]
+            {
+                windows::stop(args.json)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = args.json;
+                Err("guardian stop is supported only on Windows".into())
+            }
+        }
     };
 
     match result {
@@ -463,5 +505,6 @@ mod tests {
                 .unwrap();
         assert!(matches!(args.command, Command::Install { .. }));
         assert!(Args::try_parse_from(["guardian", "uninstall"]).is_ok());
+        assert!(Args::try_parse_from(["guardian", "stop"]).is_ok());
     }
 }

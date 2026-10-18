@@ -9,6 +9,7 @@ flowchart LR
   Core --> Win[Windows user-mode platform adapter]
   Core --> Local[Local configuration, event log, and reports]
   Win --> Power[Power Request API]
+  Win --> Stop[User-scoped stop event]
   Win --> Observe[Read-only power and network observations]
 ```
 
@@ -18,7 +19,7 @@ The skill explains how an agent can use Guardian. It is not the runtime and does
 
 Start with a foreground, per-user Windows process. It may hold a narrowly scoped `PowerRequestSystemRequired` request while a bounded lease is valid. It must not request `PowerRequestDisplayRequired`, so Windows can turn off the display and apply its normal lock policy. It must not use Away Mode, synthesize input, edit power plans, or override explicit sleep/shutdown actions.
 
-The runtime should bind a lease to an opened process handle and process creation identity, not trust a PID by itself. Leases are volatile initially. When the process exits, the lease expires, or the runtime exits, the request is cleared and the OS closes its handle. No lease is restored after a restart in the initial design.
+The runtime binds a lease to an opened process handle and process creation identity, not a PID by itself. Leases are volatile. When the target exits, the lease expires, the user requests `guardian stop`, or the runtime exits, the request is cleared and the OS closes its handle. A protected manual-reset Windows event in the current session carries only the stop signal; its DACL grants only the current user's event-control, wait, and security-query rights. Before using a named event, Guardian verifies its owner and exact protected DACL and fails closed if they do not match. The event accepts no command payload. `guardian stop` can signal all active foreground leases for that user session; its output confirms that the signal was sent, not that every lease has finished releasing. No lease is restored after a restart.
 
 Network monitoring begins as observation and classification. Detection produces evidence; a separate pure recovery policy decides whether an operation is safe. The explicit `guardian network --reconnect-saved-wifi` command can submit one request through the first existing Windows profile in preference order. It requires a confirmed Wi-Fi disconnect, confirmed absence of an active default route, and exactly one disconnected wireless interface, then waits up to 20 seconds for association. The command does not read key material, expose the profile name, confirm Internet access, or restart an adapter. The foreground monitor cannot invoke recovery. Live API and hardware behavior remain unverified.
 
@@ -37,7 +38,7 @@ The saved Wi-Fi recovery implementation uses the Native Wi-Fi API. It reads the 
 - **Status:** Accepted for the first implementation slice.
 - **Context:** A service introduces SYSTEM/admin deployment, session-0 behavior, service permissions, IPC, upgrade, and uninstall attack surfaces before we have shown that a user-mode process cannot meet the Win+L requirement.
 - **Decision:** Implement and measure a foreground user-mode process first. Add a narrowly scoped helper only if actual compatibility tests establish that it is necessary.
-- **Consequences:** No privileged service installation or IPC is required for the first slice. Session behavior remains an explicit hardware/OS test gate; no locked-session support claim is made until tested.
+- **Consequences:** No privileged service or named pipe is required for the first slice. A narrow same-user, same-session stop event is the only runtime IPC. Session behavior remains an explicit hardware/OS test gate; no locked-session support claim is made until tested.
 
 ### ADR-002: Hold only the system-required power request
 
@@ -59,6 +60,13 @@ The saved Wi-Fi recovery implementation uses the Native Wi-Fi API. It reads the 
 - **Context:** Automatically reconnecting can override user intent or disturb another healthy route. A profile name is also local network metadata that should not enter logs or output. Windows Native Wi-Fi notifications include profile-name, SSID, and profile-XML fields; the documented reason field describes operation failures and does not provide a reliable intentional-disconnect signal for ordinary disconnected notifications.
 - **Decision:** Provide a separate `--reconnect-saved-wifi` command option, refuse unless local evidence confirms a disconnected Wi-Fi interface and no active route, require exactly one disconnected Native Wi-Fi interface, and try its first Windows-preferred saved profile once. Keep the profile name only in memory and do not automate this action from the monitor.
 - **Consequences:** This creates a testable native connection request without broad network mutation. It does not establish Internet access, and controlled hardware validation is still required before making reliability claims or adding automatic recovery. The notification payload privacy and ambiguous disconnect cause are documented in the [recovery guide](../development/network-recovery.md).
+
+### ADR-005: Validate the user-scoped stop event before use
+
+- **Status:** Accepted.
+- **Context:** `guardian stop` needs to reach active foreground leases without a service, command channel, or global object accessible to other accounts. A named Windows object can already exist when Guardian attempts to create it, so the creation security descriptor alone cannot establish who owns an existing event.
+- **Decision:** Use a `Local` manual-reset event named with the session ID and a truncated hash of the current user's SID. Grant only event modification, wait, and security-query rights to that SID. Before waiting or signaling, verify the owner and exact protected DACL; reject objects that differ.
+- **Consequences:** The event carries no payload, and `guardian stop` only confirms the request was sent. A different account can still deny startup by pre-creating the predictable name with an ACL that blocks Guardian; it cannot hijack an active lease. Separate-account behavior remains untested.
 
 ## Power behavior evidence
 

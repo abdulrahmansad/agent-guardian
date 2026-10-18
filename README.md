@@ -4,7 +4,7 @@
 
 Agent Guardian is an early-stage Windows project for protecting long-running local AI coding sessions from idle sleep and transient connectivity failures. It combines a portable Agent Skill, an independent Rust runtime, and a conservative Windows integration.
 
-The repository currently contains an experimental foreground power-lease implementation, bounded local session event storage, JSON/human session reports, a read-only local network snapshot, a bounded foreground monitor for local IP-interface and route changes, an explicitly requested one-shot connectivity check, an explicitly authorized one-shot saved-profile Wi-Fi reconnect, deterministic policy core, and a checksum-verified per-user executable installer. Automatic recovery, a published runtime package, and end-to-end Codex installation have not been completed. Do not rely on this development build for unattended production work.
+The repository currently contains an experimental foreground power-lease implementation with a same-user, same-session stop command, bounded local session event storage, JSON/human session reports, a read-only local network snapshot, a bounded foreground monitor for local IP-interface and route changes, an explicitly requested one-shot connectivity check, an explicitly authorized one-shot saved-profile Wi-Fi reconnect, deterministic policy core, and a checksum-verified per-user executable installer. The Agent Skill is publicly discoverable and its Codex project installation has been verified in a disposable project. Automatic recovery, a published runtime package, and end-to-end agent runtime integration have not been completed. Do not rely on this development build for unattended production work.
 
 ## The use case
 
@@ -23,17 +23,17 @@ These are project goals. The status section below identifies what the current de
 
 ## Project status
 
-This repository is under active development. The current Windows CLI can request a bounded system-required power lease, inspect Windows power diagnostics, refuse battery operation unless explicitly enabled, and install or upgrade a per-user executable after checking its SHA-256. The core includes validated TOML configuration types, PID plus process-creation identity leases, conservative connectivity classification, and pure recovery decisions.
+This repository is under active development. The current Windows CLI can request a bounded system-required power lease, stop active leases in the current user session, inspect Windows power diagnostics, refuse battery operation unless explicitly enabled, and install or upgrade a per-user executable after checking its SHA-256. The core includes validated TOML configuration types, PID plus process-creation identity leases, conservative connectivity classification, and pure recovery decisions.
 
-The default network command reports a privacy-limited local adapter snapshot and sends no probes. `guardian monitor` is a separate, explicit foreground listener for local IP-interface and route changes. It runs for at most 60 minutes, takes a local fallback snapshot every five minutes by default, and sends no DNS, HTTP, or ICMP probes. `guardian network --probe` is an explicit, one-shot opt-in that resolves two fixed names, reads active default-route state, attempts a bounded ICMP echo to each usable gateway family, checks two fixed public endpoints, and shows a preliminary deterministic assessment. The assessment can report `HEALTHY` only when DNS, route, gateway, and both independent endpoint checks all succeed. `guardian network --reconnect-saved-wifi` is a separate one-shot action: it requires a confirmed Wi-Fi disconnect, a confirmed absence of an active default route, and exactly one disconnected wireless interface; it makes at most one saved-profile connection request and uses a 20-second Wi-Fi association confirmation window. Synchronous Windows queries can extend total command duration beyond that window. It does not confirm internet access. Automatic recovery, VPN-state classification, and persistent/background monitoring are not implemented. There is no service, IPC endpoint, autostart entry, or updater. The per-user installer is implemented, but no runtime release artifact or trusted release checksum is available yet.
+The default network command reports a privacy-limited local adapter snapshot and sends no probes. `guardian monitor` is a separate, explicit foreground listener for local IP-interface and route changes. It runs for at most 60 minutes, takes a local fallback snapshot every five minutes by default, and sends no DNS, HTTP, or ICMP probes. `guardian network --probe` is an explicit, one-shot opt-in that resolves two fixed names, reads active default-route state, attempts a bounded ICMP echo to each usable gateway family, checks two fixed public endpoints, and shows a preliminary deterministic assessment. The assessment can report `HEALTHY` only when DNS, route, gateway, and both independent endpoint checks all succeed. `guardian network --reconnect-saved-wifi` is a separate one-shot action: it requires a confirmed Wi-Fi disconnect, a confirmed absence of an active default route, and exactly one disconnected wireless interface; it makes at most one saved-profile connection request and uses a 20-second Wi-Fi association confirmation window. Synchronous Windows queries can extend total command duration beyond that window. It does not confirm internet access. Automatic recovery, VPN-state classification, and persistent/background monitoring are not implemented. There is no service, named pipe, autostart entry, or updater. The local stop signal is a protected Windows event limited to the current user and session. The per-user installer is implemented, but no runtime release artifact or trusted release checksum is available yet.
 
 See [development status](docs/STATUS.md), [acceptance matrix](docs/testing/acceptance.md), [threat model](docs/security/threat-model.md), and the [local release preparation checklist](docs/release/README.md). A read-only [development demo](demos/unattended-session.md) is also available.
 
 ## Features
 
-- **Power Guardian:** Experimental foreground system-required power lease. The display is not requested to stay on. User-initiated sleep, shutdown, restart, critical battery policy, Windows policy, and device behavior remain in control.
+- **Power Guardian:** Experimental foreground system-required power lease. The display is not requested to stay on. `guardian stop` requests release of active Guardian leases in the current Windows user session; Ctrl+C is also available in the owning terminal. User-initiated sleep, shutdown, restart, critical battery policy, Windows policy, and device behavior remain in control.
 - **Network Guardian:** Experimental local observation reports Wi-Fi adapter state, gateway presence, and a tunnel-type interface hint. `guardian monitor` listens for local IP-interface and route changes, refreshing an aggregate snapshot on events and at a bounded fallback interval. It is foreground-only, expires within 60 minutes, sends no probes, logs no events, and performs no recovery. `guardian network --probe` adds two fixed DNS lookups, active default-route inspection, bounded gateway ICMP checks, two one-shot public connectivity checks, and a preliminary core classification. `guardian network --reconnect-saved-wifi` explicitly requests one reconnection through the first saved profile in Windows preference order, only when local evidence confirms a disconnected Wi-Fi interface and no active default route; it refuses multiple or ambiguous interfaces, does not restart adapters, and does not expose profile names or credentials. It uses a 20-second association confirmation window; synchronous Windows queries can extend total command duration. Wi-Fi association does not prove internet access. Missing probe evidence prevents a `HEALTHY` result; an absent ICMP reply remains unknown because networks often filter ping. It does not confirm VPN state. Recovery remains manual and hardware behavior is **NOT TESTED**.
-- **Agent integration:** The Agent Skill package passes metadata validation and was copied and listed for Codex by the Skills CLI in a disposable project. Remote installation and end-to-end runtime behavior have not yet been validated.
+- **Agent integration:** The Agent Skill passes metadata validation and is discoverable on the public repository. The Skills CLI copied it into a disposable Codex project, listed it, removed it, and then returned an empty project skill list. End-to-end runtime behavior remains unverified.
 - **Incident reports:** Power lease events and the outcome of an explicitly requested saved-profile reconnect are stored as typed, bounded local JSONL events. Reconnect records contain an event UUID, timestamp, and redacted result category; monitor and probe observations are not journaled. The CLI can show events or export a session report. Interrupted sessions remain marked incomplete.
 
 ## Quick start
@@ -44,9 +44,13 @@ Install the Agent Skill with the standard Skills CLI:
 
 This installs only the Agent Skill. If the CLI asks, select Codex. You can select it without prompts with:
 
-    npx skills add abdulrahmansad/agent-guardian --skill agent-guardian --agent codex
+    npx skills add abdulrahmansad/agent-guardian --skill agent-guardian --agent codex --yes
 
-It does not install the Windows runtime or grant administrator access. The GitHub repository has no published runtime artifact yet, and remote installation has not been validated because the configured remote has no published refs.
+To remove it from a project:
+
+    npx skills remove agent-guardian --yes
+
+It installs only the Agent Skill; it does not install the Windows runtime or grant administrator access. The public repository has no runtime artifact yet. Remote Codex project installation and removal were verified in a disposable temporary project.
 
 To build and run the development CLI from a Rust environment:
 
@@ -54,7 +58,7 @@ To build and run the development CLI from a Rust environment:
     cargo run -p guardian-cli -- start --ttl-minutes 60
     cargo run -p guardian-cli -- start --config config.example.toml --ttl-minutes 30
 
-The start command runs in the foreground and binds the lease to Guardian's own process. Press Ctrl+C to end it. The request also expires after the configured duration. Start on AC power for a useful unattended session. On battery, the command refuses by default; the allow-battery option permits a lease capped at five minutes.
+The start command runs in the foreground and binds the lease to Guardian's own process. Run `guardian stop` from the same Windows user session to request release of active Guardian leases, or press Ctrl+C in the owning terminal. The stop command confirms that it sent a request, not that the lease has already been released. The request also expires after the configured duration. Start on AC power for a useful unattended session. On battery, the command refuses by default; the allow-battery option permits a lease capped at five minutes.
 
 To bind a lease to an existing process owned by the same Windows user and running in the same session as Guardian:
 
@@ -77,7 +81,7 @@ Windows sleep behavior depends on device firmware, power policy, and sleep model
 
 | Agent | Status |
 |---|---|
-| OpenAI Codex | Experimental. The skill validates and is discoverable locally; remote installation and end-to-end runtime workflows remain unverified. |
+| OpenAI Codex | Experimental. Public discovery and project installation/removal were verified in a disposable project; end-to-end runtime workflows remain unverified. |
 | Other coding agents | Planned |
 
 ## Installation and permissions
@@ -92,7 +96,7 @@ No runtime release has been published yet. The current local GNU/LLVM build depe
 
 This local hash confirms the bytes copied into the install directory; it does not verify who built the executable. For a future release, use the checksum distributed with the release and verify that release through a trusted source. See the [runtime installation guide](docs/development/installation.md).
 
-No service, SYSTEM process, machine-wide power-plan change, firewall change, DNS change, or adapter restart is installed by the current build.
+No service, SYSTEM process, named pipe, autostart entry, machine-wide power-plan change, firewall change, DNS change, or adapter restart is installed by the current build. The local stop signal is a same-user, same-session Windows event; Guardian validates a reused event's owner and access rules and refuses mismatches. The command only requests foreground lease release.
 
 ## Usage
 

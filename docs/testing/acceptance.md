@@ -22,7 +22,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 16 | Battery transitions behave safely | NOT TESTED | AC/DC transition tests; Modern Standby limitations reported |
 | 17 | Install/uninstall leave no unauthorized persistent changes | NOT TESTED | Clean-user VM install/uninstall audit |
 | 18 | Reboot does not restore invalid leases | NOT TESTED | Restart test; expected no persisted lease restoration initially |
-| 19 | Service permissions resist unauthorized clients | NOT TESTED | No service/IPC planned in first slice; gate before adding it |
+| 19 | Stop signal is inaccessible from another Windows user or a pre-created broad-ACL event | NOT TESTED | Windows test rejects a pre-created event with a broad ACL; verify denial from a separate Windows account |
 | 20 | Reports reflect actual events | PASS | JSONL fixture CLI smoke test reconciled start/release timestamps and duration; typed reconnect outcomes are included by timestamp interval. A live power-lease event chain remains untested |
 | 21 | Default local snapshot omits identifiers and changes no settings | PASS | Windows 11 x64 CLI smoke test showed counts/booleans only; a pure core test covers adapter summary aggregation; the default command does not call the probe executor |
 | 22 | Configured journal size and retention are enforced | PASS | Disposable-directory integration test verifies 1 MiB rotation and removal of a file older than the configured one-day retention |
@@ -38,6 +38,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 32 | Power-request diagnostics omit requestor names, process IDs, and paths | PASS | The non-elevated Windows `guardian status` smoke check returned only a generic error with command output suppressed; focused test checks the success message contains no requestor identifiers. Successful elevated query remains NOT TESTED |
 | 33 | Local adapter summary follows Windows' linked adapter list and rejects malformed links | PASS | Windows-target unit tests cover a sparse linked list, an out-of-buffer pointer, and a cycle. Live adapter enumeration during interface changes remains NOT TESTED |
 | 34 | PID-bound power lease rejects another user or session | PASS | Pure policy cases reject mismatched user/session values, and a Windows-target test verifies the current process token path. Cross-user/session execution has not been performed on a separate Windows account |
+| 35 | Same-user stop signal wakes the foreground lease waiter | PASS | Windows-target tests verify the protected event signals a waiter and reject a pre-created event with a broad ACL, without acquiring a power request; full power-request release remains NOT TESTED |
 
 ## Automated test plan
 

@@ -13,6 +13,11 @@ use guardian_core::{
     PowerLeasePolicyError, PowerSourceClass, ProcessIdentity, ReleaseReason, SessionEvent,
     SessionEventKind, SessionReport, WifiReconnectResult, classify_local_evidence,
 };
+use sha2::{Digest, Sha256};
+use windows_sys::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, LocalFree, SetLastError, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
     GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
@@ -20,10 +25,23 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
-use windows_sys::Win32::Security::{
-    EqualSid, GetTokenInformation, TOKEN_QUERY, TOKEN_USER, TokenSessionId, TokenUser,
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    ConvertStringSidToSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
 };
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+use windows_sys::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+    GetSecurityDescriptorDacl, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenSessionId, TokenUser,
+};
+use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+use windows_sys::Win32::System::Threading::{
+    CREATE_EVENT_MANUAL_RESET, CreateEventExW, EVENT_MODIFY_STATE, GetCurrentProcess, OpenEventW,
+    OpenProcessToken, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects,
+};
 
 mod install;
 mod monitor;
@@ -33,11 +51,10 @@ mod signals;
 
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
-const WAIT_OBJECT_0: u32 = 0;
-const WAIT_TIMEOUT: u32 = 0x102;
 const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const POWER_REQUEST_SYSTEM_REQUIRED: i32 = 1;
 const BATTERY_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
+const STOP_EVENT_ACCESS: u32 = EVENT_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE | READ_CONTROL;
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(10);
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 const ERROR_NO_DATA: u32 = 232;
@@ -294,6 +311,432 @@ impl Drop for ProcessHandle {
     }
 }
 
+struct LocalAllocation(*mut c_void);
+
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = LocalFree(self.0);
+        }
+    }
+}
+
+fn stop_event_name_for(session_id: u32, sid: &str) -> String {
+    let digest = Sha256::digest(sid.as_bytes());
+    let suffix = digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("Local\\AgentGuardian.Stop.{session_id}.{suffix}")
+}
+
+fn stop_event_identity() -> Result<(Vec<u16>, String), String> {
+    let token = TokenHandle::open(unsafe { GetCurrentProcess() })?;
+    let session_id = token.session_id()?;
+    let user_buffer = token.user_buffer()?;
+    let sid = token_user_sid(&user_buffer)?;
+    let mut sid_string = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut sid_string) } == 0 {
+        return Err(format!(
+            "could not identify the current Windows user for stop signaling (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if sid_string.is_null() {
+        return Err("Windows returned an invalid current-user identifier".into());
+    }
+    let sid_allocation = LocalAllocation(sid_string.cast());
+    let mut sid_length = 0_usize;
+    while sid_length < 192 && unsafe { *sid_string.add(sid_length) } != 0 {
+        sid_length += 1;
+    }
+    if sid_length == 0 || sid_length == 192 {
+        return Err("Windows returned an invalid current-user identifier".into());
+    }
+    let sid_text =
+        String::from_utf16(unsafe { std::slice::from_raw_parts(sid_string, sid_length) })
+            .map_err(|_| "Windows returned an invalid current-user identifier".to_string())?;
+    if !sid_text.starts_with("S-")
+        || !sid_text
+            .chars()
+            .all(|character| character == 'S' || character == '-' || character.is_ascii_digit())
+    {
+        return Err("Windows returned an invalid current-user identifier".into());
+    }
+    let _ = sid_allocation;
+    let name = stop_event_name_for(session_id, &sid_text);
+    let wide_name = name.encode_utf16().chain(std::iter::once(0)).collect();
+    Ok((wide_name, sid_text))
+}
+
+struct SecurityDescriptor(LocalAllocation);
+
+impl SecurityDescriptor {
+    fn for_user(sid: &str) -> Result<Self, String> {
+        let sddl = format!("D:P(A;;0x{:08x};;;{sid})", STOP_EVENT_ACCESS);
+        Self::from_sddl(&sddl)
+    }
+
+    fn from_sddl(sddl: &str) -> Result<Self, String> {
+        let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide_sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            if !descriptor.is_null() {
+                let _ = LocalAllocation(descriptor.cast());
+            }
+            return Err(format!(
+                "could not secure the Guardian stop signal (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if descriptor.is_null() {
+            return Err("Windows returned an invalid stop-signal security descriptor".into());
+        }
+        Ok(Self(LocalAllocation(descriptor)))
+    }
+}
+
+fn sid_from_text(sid: &str) -> Result<LocalAllocation, String> {
+    let wide_sid: Vec<u16> = sid.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut binary_sid = std::ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(wide_sid.as_ptr(), &mut binary_sid) } == 0 {
+        if !binary_sid.is_null() {
+            let _ = LocalAllocation(binary_sid.cast());
+        }
+        return Err(format!(
+            "could not validate the Guardian stop signal identity (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if binary_sid.is_null() {
+        return Err("Windows returned an invalid stop-signal identity".into());
+    }
+    Ok(LocalAllocation(binary_sid.cast()))
+}
+
+fn stop_event_security_matches(handle: Handle, sid: &str) -> Result<bool, String> {
+    let expected_sid = sid_from_text(sid)?;
+    let mut owner = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let error = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if error != 0 {
+        if !descriptor.is_null() {
+            let _ = LocalAllocation(descriptor.cast());
+        }
+        return Err(format!(
+            "could not inspect the Guardian stop signal security (Windows error {error})"
+        ));
+    }
+    if descriptor.is_null() {
+        return Err("Windows returned an invalid stop-signal security descriptor".into());
+    }
+    let _descriptor = LocalAllocation(descriptor.cast());
+    if owner.is_null() || unsafe { EqualSid(owner, expected_sid.0) } == 0 {
+        return Ok(false);
+    }
+
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if control & SE_DACL_PROTECTED == 0 {
+        return Ok(false);
+    }
+
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut descriptor_dacl = std::ptr::null_mut();
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut descriptor_dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if dacl_present == 0 || dacl.is_null() || descriptor_dacl.is_null() {
+        return Ok(false);
+    }
+
+    let mut acl_size = ACL_SIZE_INFORMATION::default();
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&mut acl_size as *mut ACL_SIZE_INFORMATION).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if acl_size.AceCount != 1 {
+        return Ok(false);
+    }
+
+    let mut ace = std::ptr::null_mut();
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    let header = unsafe { &*(ace.cast::<ACE_HEADER>()) };
+    if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8
+        || header.AceFlags != 0
+        || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+    {
+        return Ok(false);
+    }
+    let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+    if allowed.Mask != STOP_EVENT_ACCESS {
+        return Ok(false);
+    }
+    let ace_sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+    Ok(unsafe { EqualSid(ace_sid, expected_sid.0) } != 0)
+}
+
+struct StopEvent(Handle);
+
+impl StopEvent {
+    fn create() -> Result<Self, String> {
+        let (name, sid) = stop_event_identity()?;
+        Self::create_named(&name, &sid)
+    }
+
+    fn create_named(name: &[u16], sid: &str) -> Result<Self, String> {
+        let descriptor = SecurityDescriptor::for_user(sid)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        unsafe { SetLastError(0) };
+        let handle = unsafe {
+            CreateEventExW(
+                &attributes,
+                name.as_ptr(),
+                CREATE_EVENT_MANUAL_RESET,
+                STOP_EVENT_ACCESS,
+            )
+        };
+        if handle.is_null() || handle as isize == -1 {
+            return Err(format!(
+                "could not create the Guardian stop signal (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        let already_exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        if !matches!(stop_event_security_matches(handle, sid), Ok(true)) {
+            unsafe { CloseHandle(handle) };
+            return Err(
+                "Guardian stop signal has unexpected ownership or access rules; refusing to use it"
+                    .into(),
+            );
+        }
+        if already_exists {
+            match unsafe { WaitForSingleObject(handle, 0) } {
+                WAIT_TIMEOUT => {}
+                WAIT_OBJECT_0 => {
+                    unsafe { CloseHandle(handle) };
+                    return Err(
+                        "a Guardian stop is already in progress for this user session".into(),
+                    );
+                }
+                _ => {
+                    let error = unsafe { GetLastError() };
+                    unsafe { CloseHandle(handle) };
+                    return Err(format!(
+                        "could not inspect the Guardian stop signal (Windows error {error})"
+                    ));
+                }
+            }
+        }
+        Ok(Self(handle))
+    }
+
+    fn request_stop(json: bool) -> Result<(), String> {
+        let (name, sid) = stop_event_identity()?;
+        let requested = Self::request_stop_named(&name, &sid)?;
+        if json {
+            println!("{{\"stop_requested\":{requested}}}");
+        } else if requested {
+            println!(
+                "Stop request sent to active Guardian power lease(s) in this user session; release is not confirmed."
+            );
+        } else {
+            println!("No active Guardian power lease was found in this user session.");
+        }
+        Ok(())
+    }
+
+    fn request_stop_named(name: &[u16], sid: &str) -> Result<bool, String> {
+        let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE | READ_CONTROL, 0, name.as_ptr()) };
+        if handle.is_null() || handle as isize == -1 {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_FILE_NOT_FOUND {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "could not access the Guardian stop signal (Windows error {error})"
+                ))
+            }
+        } else {
+            let event = Self(handle);
+            if !matches!(stop_event_security_matches(event.0, sid), Ok(true)) {
+                return Err(
+                    "Guardian stop signal has unexpected ownership or access rules; refusing to use it"
+                        .into(),
+                );
+            }
+            if unsafe { SetEvent(event.0) } == 0 {
+                return Err(format!(
+                    "could not signal Guardian to stop (Windows error {})",
+                    unsafe { GetLastError() }
+                ));
+            }
+            Ok(true)
+        }
+    }
+}
+
+impl Drop for StopEvent {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseWait {
+    TargetExited,
+    StopRequested,
+    Timeout,
+}
+
+fn wait_for_target_or_stop(
+    process: &ProcessHandle,
+    stop_event: &StopEvent,
+    timeout_ms: u32,
+) -> Result<LeaseWait, String> {
+    let handles = [process.0, stop_event.0];
+    match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, timeout_ms) } {
+        WAIT_OBJECT_0 => Ok(LeaseWait::TargetExited),
+        value if value == WAIT_OBJECT_0 + 1 => Ok(LeaseWait::StopRequested),
+        WAIT_TIMEOUT => Ok(LeaseWait::Timeout),
+        WAIT_FAILED => Err(format!(
+            "could not wait for the target process or stop request (Windows error {})",
+            unsafe { GetLastError() }
+        )),
+        _ => Err("Windows returned an unexpected lease wait result".into()),
+    }
+}
+
+#[cfg(test)]
+mod stop_event_tests {
+    use super::*;
+
+    fn unique_name() -> Vec<u16> {
+        format!("Local\\AgentGuardian.StopTest.{}", LeaseId::new_v4())
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    #[test]
+    fn event_name_is_stable_per_user_and_session_without_exposing_sid() {
+        let sid = "S-1-5-21-123-456-789-1001";
+        let first = stop_event_name_for(7, sid);
+        assert_eq!(first, stop_event_name_for(7, sid));
+        assert_ne!(first, stop_event_name_for(8, sid));
+        assert_ne!(first, stop_event_name_for(7, "S-1-5-21-987-654-321-1002"));
+        assert!(first.starts_with("Local\\AgentGuardian.Stop.7."));
+        assert!(!first.contains(sid));
+    }
+
+    #[test]
+    fn user_stop_signal_wakes_lease_wait_without_power_api() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = unique_name();
+        let event = StopEvent::create_named(&name, &sid).unwrap();
+        let second_handle = StopEvent::create_named(&name, &sid).unwrap();
+        assert!(StopEvent::request_stop_named(&name, &sid).unwrap());
+        let current_process = ProcessHandle::open(unsafe { GetCurrentProcessId() })
+            .unwrap()
+            .0;
+        let wait_handles = [current_process.0, event.0];
+        assert_eq!(
+            unsafe { WaitForMultipleObjects(2, wait_handles.as_ptr(), 0, 0) },
+            WAIT_OBJECT_0 + 1
+        );
+        assert!(StopEvent::request_stop_named(&name, &sid).unwrap());
+        drop(second_handle);
+        drop(event);
+        assert!(!StopEvent::request_stop_named(&name, &sid).unwrap());
+    }
+
+    #[test]
+    fn precreated_stop_event_with_broad_acl_is_rejected() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = unique_name();
+        let descriptor = SecurityDescriptor::from_sddl("D:P(A;;GA;;;WD)").unwrap();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        let handle = unsafe {
+            CreateEventExW(
+                &attributes,
+                name.as_ptr(),
+                CREATE_EVENT_MANUAL_RESET,
+                STOP_EVENT_ACCESS,
+            )
+        };
+        assert!(!handle.is_null() && handle as isize != -1);
+        let event = StopEvent(handle);
+
+        assert!(StopEvent::create_named(&name, &sid).is_err());
+        assert!(StopEvent::request_stop_named(&name, &sid).is_err());
+        assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_TIMEOUT);
+    }
+}
+
 struct PowerLease {
     handle: Handle,
     _reason_storage: Vec<u16>,
@@ -426,6 +869,7 @@ pub fn start(
         .acquire(identity, started_at, expires_at)
         .map_err(|error| error.to_string())?;
 
+    let stop_event = StopEvent::create()?;
     let event_store = event_store(&config)?;
     event_store.prepare()?;
     let reason = format!("Agent Guardian lease for PID {process_id}");
@@ -444,7 +888,7 @@ pub fn start(
         );
     } else {
         println!(
-            "AC power confirmed. Lease expires in {} minute(s). Press Ctrl+C or wait for the target process to exit.",
+            "AC power confirmed. Lease expires in {} minute(s). Use guardian stop, Ctrl+C, or wait for the target process to exit.",
             initial_duration.as_secs() / 60
         );
     }
@@ -453,11 +897,20 @@ pub fn start(
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let remaining = Duration::from_millis(policy.deadline_ms().saturating_sub(elapsed_ms));
         let wait_for = remaining.min(POWER_POLL_INTERVAL);
-        if process.wait(wait_for.as_millis().max(1) as u32)? {
-            let _ = leases.reap(unix_time_ms(), |_| false);
-            println!("Target process exited; releasing the power request.");
-            active_lease.finish(ReleaseReason::TargetExited)?;
-            return Ok(());
+        match wait_for_target_or_stop(&process, &stop_event, wait_for.as_millis().max(1) as u32)? {
+            LeaseWait::TargetExited => {
+                let _ = leases.reap(unix_time_ms(), |_| false);
+                println!("Target process exited; releasing the power request.");
+                active_lease.finish(ReleaseReason::TargetExited)?;
+                return Ok(());
+            }
+            LeaseWait::StopRequested => {
+                let _ = leases.reap(unix_time_ms(), |_| false);
+                println!("Stop requested; releasing the power request.");
+                active_lease.finish(ReleaseReason::UserRequestedStop)?;
+                return Ok(());
+            }
+            LeaseWait::Timeout => {}
         }
 
         let power_source = if power_status()?.ac_line_status == 1 {
@@ -498,6 +951,10 @@ pub fn install(json: bool, expected_sha256: &str) -> Result<(), String> {
 
 pub fn uninstall(json: bool) -> Result<(), String> {
     install::uninstall(json)
+}
+
+pub fn stop(json: bool) -> Result<(), String> {
+    StopEvent::request_stop(json)
 }
 
 fn unix_time_ms() -> u64 {
@@ -957,6 +1414,7 @@ fn release_label(reason: ReleaseReason) -> &'static str {
         ReleaseReason::BatteryTransition => "Power lease released after battery transition",
         ReleaseReason::RuntimeError => "Power lease released after runtime error",
         ReleaseReason::RuntimeExit => "Power lease released when runtime exited",
+        ReleaseReason::UserRequestedStop => "Power lease released after user stop request",
     }
 }
 

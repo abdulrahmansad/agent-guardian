@@ -73,6 +73,10 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Final local validation after those fixes passed: formatting; Clippy with warnings denied; Windows GNU/LLVM workspace tests (35 CLI/Windows and 38 core); documentation links (23 Markdown files); Agent Skills validation; six release-packager tests; Skills CLI discovery; crate packaging; and `cargo audit` over 66 locked dependencies.
 - [x] Updated README and Agent Skill command guidance to match the same-user/same-session process restriction and redacted power diagnostics. A non-elevated `guardian status` smoke check returned a generic error with `/requests` output suppressed; the successful elevated-query path remains NOT TESTED.
 - [x] The optimized local GNU/LLVM Windows build succeeded after hardening and reports version 0.1.0. The local release packager correctly rejected it because it imports `libunwind.dll`; the standalone MSVC release check remains open.
+- [x] Added `guardian stop` for active foreground power leases in the current Windows user session. The named event uses a protected user-SID DACL and a session-specific, hashed name; Guardian checks the existing event owner and exact DACL before using it and refuses a pre-created broad-ACL event. A stop request does not claim release is complete. Windows-target tests verify ACL rejection, signaling, and waiter wakeup without acquiring a power request.
+- [x] Verified public Skills CLI discovery, disposable Codex project installation/listing, and default project-scoped removal; the project skill list was empty after removal.
+- [x] Created the public draft PR for the authorized hardening branch. Hosted CI has not completed yet.
+- [x] Final stop-command validation passed: formatting, Clippy with warnings denied, Windows-target workspace tests (38 CLI and 38 core), 23-file documentation-link check, Agent Skills validation, six package tests, and Rust crate packaging.
 
 ## In progress
 
@@ -84,23 +88,23 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 - [ ] Keep automatic monitor-triggered recovery disabled until explicit user-intent handling, backoff/cancellation, and controlled hardware validation are designed and tested. One-shot reconnect outcome reporting is implemented separately.
 - [ ] Validate the one-shot Native Wi-Fi reconnection on an isolated adapter/profile and record association plus Internet-verification results; do not use the active workstation for disruptive testing.
-- [ ] Validate published GitHub installation and Codex skill installation/uninstallation after the remote is configured and published.
 - [ ] Build and exercise the actual MSVC release executable in a clean Windows environment; the import-table screening helper alone cannot prove runtime dependency closure. Do not publish artifacts without required authorization.
 - [ ] Perform Windows power request lifecycle, crash cleanup, battery transition, display-off, and locked-session checks on representative hardware.
 - [ ] Measure idle CPU, memory, probe frequency, startup latency, event latency, and bounded log growth before making performance claims.
 - [ ] Complete the acceptance matrix, security review, release packaging/checksums, demo, and launch copy.
-- [ ] Reassess public release readiness. Do not publish, push, tag, or release without the required authorization.
+- [ ] Reassess public release readiness. Do not tag or publish a runtime release without explicit authorization.
 
 ## Known failures and unverified assumptions
 
-- `origin` points to `https://github.com/abdulrahmansad/agent-guardian.git`, but `git ls-remote origin HEAD` returned no refs. Remote contents, publication state, and permissions are not established.
+- `origin` points to the public repository `https://github.com/abdulrahmansad/agent-guardian.git`; the authorized hardening branch has an open draft PR targeting `main`.
 - The system-required power request has compiled but has not been held in a real user session. Idle sleep, display-off, release, crash cleanup, Win+L, S3, and battery hardware behavior remain unverified.
+- The stop event rejects pre-created objects with a mismatched owner or ACL. A different account in the same session could still deny Guardian access by pre-creating the predictable name with a restrictive ACL; this fails closed and can block lease startup, but cannot take over an active lease. Separate-account behavior remains untested.
 - `powercfg /requests` requires an elevated shell on this host. `guardian doctor` reports whether the query succeeded and continues; `guardian status` returns a generic error without exposing command output.
 - The default local network snapshot uses `GetAdaptersAddresses` and follows its linked-list pointers. Synthetic linked-list tests pass, but adapter state and notification behavior have not been validated during a physical network change. The `--probe` option has not been run against a live network; DNS resolver, route, ICMP, proxy behavior (including a real HTTP 407), and total runtime are not hardware-validated.
 - The core recovery planner remains deterministic. The foreground monitor observes local interface/route changes only and cannot invoke recovery. The separate one-shot recovery command submits a saved-profile reconnect after conservative local-state checks, but there is no automatic recovery or adapter restart. The Native Wi-Fi API action, saved-profile behavior, connection verification, manual disconnect handling, and actual monitor notification delivery on a controlled network remain NOT TESTED.
-- Installer and uninstaller file operations are implemented and tested only in disposable temporary directories. No public runtime artifact/checksum exists; clean-user installation, replacement of a running executable, and release-based removal remain untested. There is no updater, service/IPC, or end-to-end agent runtime integration. Network settings in the config remain reserved and have no runtime effect.
+- Installer and uninstaller file operations are implemented and tested only in disposable temporary directories. No public runtime artifact/checksum exists; clean-user installation, replacement of a running executable, and release-based removal remain untested. There is no updater, service, named pipe, or end-to-end agent runtime integration; the same-user/session stop event is local IPC. Network settings in the config remain reserved and have no runtime effect.
 - The installer rechecks and rehashes its closed staging file and compares Windows file identity to avoid self-uninstall through a hard link. A focused review and 2026-10-19 re-review found no privilege escalation, but confirmed same-user concurrent filesystem tampering and ancestor-path races as residual limitations. A robust mitigation requires handle-relative file operations rather than another path check. The installer does not elevate. A supplied digest does not authenticate the artifact publisher.
-- The CI workflow has not run on GitHub. The repository remote has no refs, so hosted CI and public Skills CLI install cannot be verified.
+- Hosted CI has not completed on GitHub. Public Skills CLI discovery and disposable project installation/removal were verified, but end-to-end runtime integration remains unverified.
 - The Rust 1.89 local cross-check could not link Windows GNU build scripts because the available LLVM-MinGW runtime lacks GCC support libraries; the workflow's 1.89 MSVC check is the authoritative remaining MSRV validation and has not run on GitHub.
 - A monitor resource capture configured for 60 seconds exited successfully but the measuring process reported 18,494.7 seconds elapsed. The host may have been suspended or delayed; discard its CPU result and do not use its sparse memory samples as a baseline.
 - The local optimized GNU/LLVM executable imports `libunwind.dll`; launching it requires the LLVM-MinGW runtime on `PATH`, and the current installer copies only `guardian.exe`. The release packager correctly rejects this binary. The MSVC artifact has not yet been built or exercised, and the static/delay-load import screen cannot detect dynamic DLL loading.
@@ -110,8 +114,8 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 - Approval for destructive/disruptive network testing on a real adapter or active network.
 - Physical-device validation across Windows 10/11, AC/battery, sleep models, locked session, and Wi-Fi hardware.
-- Approval for public repository publication, tagging, release publication, or signed binaries if required.
+- Authorization for a runtime release, tagging, or signed binaries if required. The existing draft PR and branch push were authorized.
 
 ## Next concrete action
 
-Build and exercise the Windows x64 MSVC package on a suitable runner, then complete the hardware and hosted-CI acceptance gates. Do not describe the artifact as self-contained until clean-environment runtime checks pass. Keep automatic recovery, adapter restarts, and other unreviewed network mutations disabled; the one-shot saved-profile reconnect remains explicit and its real-hardware behavior is **NOT TESTED**.
+Complete hosted CI and build/exercise the Windows x64 MSVC package in a clean Windows environment, then address the remaining hardware acceptance gates. Do not describe the artifact as self-contained until clean-environment runtime checks pass. Keep automatic recovery, adapter restarts, and other unreviewed network mutations disabled; the one-shot saved-profile reconnect remains explicit and its real-hardware behavior is **NOT TESTED**.
