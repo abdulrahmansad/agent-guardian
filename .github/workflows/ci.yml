@@ -34,6 +34,18 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets
 
+      - name: Build the Windows x64 release executable
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Validate local runtime packaging
+        run: python scripts/package_release.py --binary target/x86_64-pc-windows-msvc/release/guardian.exe --output-dir dist
+
+      - name: Validate Rust crate packaging
+        run: cargo package --workspace --no-verify
+
+      - name: Test deterministic release packager
+        run: python -m unittest discover -s tests -p "test_*.py"
+
       - name: Check local documentation links
         run: python scripts/check-doc-links.py
 
@@ -52,3 +64,19 @@ jobs:
         run: |
           cargo install cargo-audit --locked --version 0.22.2 --jobs 1
           cargo audit
+
+  msrv:
+    name: Minimum Rust version
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install Rust 1.89
+        shell: pwsh
+        run: rustup toolchain install 1.89.0-x86_64-pc-windows-msvc --profile minimal
+
+      - name: Check workspace at the declared minimum
+        run: cargo +1.89.0-x86_64-pc-windows-msvc check --workspace --all-targets

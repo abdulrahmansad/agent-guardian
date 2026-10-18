@@ -32,6 +32,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 26 | Explicit proxy authentication rejection is classified without retrying or changing settings | PASS | HTTP status interpretation and core policy tests cover `407` → `PROXY_RESTRICTED` → `NotifyUser`; live proxy behavior remains untested |
 | 27 | Foreground local monitor starts, expires within its configured bound, and unregisters Windows notifications | PASS | Windows 11 x64 one-minute monitor smoke check emitted the initial and stopped JSON records; no local state change occurred |
 | 28 | Windows interface and route notifications refresh the privacy-limited snapshot | NOT TESTED | Requires a controlled test adapter/network and an actual interface or route change; do not disrupt the active workstation |
+| 29 | Checksum-verified installer and scoped uninstaller preserve unrelated files | PASS | Windows tests used disposable paths with spaces and non-ASCII characters. They covered staged-file rehashing, checksum mismatch preserving the prior executable, upgrade, removal of only `guardian.exe`, and the same-path/hard-link identity guards. Actual removal behavior while the executable image is running, a real profile install, and a clean-user VM audit remain NOT TESTED |
 
 ## Automated test plan
 

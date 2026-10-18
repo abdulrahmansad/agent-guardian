@@ -11,7 +11,7 @@ Use this skill when the user asks to leave a coding agent working unattended, av
 
 ## Runtime setup
 
-The Agent Skill and Guardian runtime are separate. Installing this skill does not install a service or runtime. Check for the guardian executable before using runtime commands. If it is unavailable, explain that the runtime must be installed separately; do not run a remote script or request elevation to install it.
+The Agent Skill and Guardian runtime are separate. Installing this skill does not install a runtime. Check for the `guardian` executable before using runtime commands. If it is unavailable, explain that the runtime must be installed separately; no public runtime package is currently available. Do not download or install a binary without the user's request and a trusted SHA-256 checksum. The per-user `guardian install --sha256 <DIGEST>` command does not install a service or request elevation.
 
 ## Power protection
 

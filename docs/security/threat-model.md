@@ -30,8 +30,9 @@ Last reviewed: 2026-10-18. This is an initial design document, not a completed s
 | Malicious profile/interface string | Command injection or wrong adapter mutation | Avoid shell-based mutations; use typed native APIs and validated identities if recovery is ever enabled |
 | Malicious IPC client | Unauthorized lease/recovery or privilege escalation | No IPC/service in first slice; future named pipe requires explicit DACL, local-only semantics, caller token validation, bounded schema, server-side quotas |
 | Log injection or secret leakage | Misleading reports / disclosure | The journal accepts typed lease events only, with no arbitrary summary text, process IDs, network names, addresses, or credentials; event files are size/retention bounded |
-| Malicious config / path / reparse point | Unsafe limits or arbitrary file access | Configuration input is read-only, limited to 64 KiB, rejects unknown fields, and validates ranges. The event store rejects symlinked log files and a symlinked leaf directory. Ancestor reparse-point/race handling and future installer paths need further review |
-| Compromised artifact or update | Arbitrary code execution | No auto-update or unverified remote script; future release archives need authenticated provenance and SHA-256 verification |
+| Malicious config / path / reparse point | Unsafe limits or arbitrary file access | Configuration input is read-only, limited to 64 KiB, rejects unknown fields, and validates ranges. The event store rejects symlinked log files and a symlinked leaf directory. Ancestor reparse-point/race handling remains for dedicated review |
+| Compromised artifact or update | Arbitrary code execution | No auto-update or remote download path. The per-user installer hashes the running executable against a caller-supplied digest, stages and rechecks the copy, and replaces only the fixed Guardian executable. The digest does not authenticate its publisher; the user must obtain it from a trusted release channel. No public artifact/checksum is available yet |
+| Reparse-point or path substitution during install | Writes outside the intended per-user install directory | Fixed destination names under `%LOCALAPPDATA%\Programs\AgentGuardian`; source, destination, and install directories are checked for reparse points, staging uses create-new in the destination directory, and the closed staged file is rechecked and rehashed before replacement. Uninstall also compares Windows file identity to refuse deleting a hard-link alias of the running executable. Same-user concurrent filesystem tampering and ancestor-path races remain a security-review item; the installer does not elevate |
 
 ## Initial security posture
 
@@ -40,6 +41,7 @@ Last reviewed: 2026-10-18. This is an initial design document, not a completed s
 - No plaintext Wi-Fi credentials or agent/API secrets in configuration or logs.
 - The default network command sends no probes. `guardian monitor` is a bounded, foreground observer of local IP-interface and route changes. It reports aggregate adapter flags/counts and route presence only, does not send probes or change network/power state, and writes no network event details to the journal. `guardian network --probe` explicitly performs fixed DNS, route, gateway-ICMP, and web checks; it uses Windows automatic proxy settings, disables redirects and authentication, discards response text, and writes no probe results to the journal. Neither output authorizes recovery.
 - Real adapter disruption is opt-in and requires a controlled test device/network and explicit approval.
+- The installer never downloads or executes an additional payload. It preserves local configuration and logs on removal. Its supplied checksum verifies copied bytes only and is not a publisher signature or provenance proof.
 
 ## Review gates
 

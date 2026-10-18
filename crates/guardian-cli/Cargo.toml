@@ -13,16 +13,20 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-guardian-core = { path = "../guardian-core" }
+guardian-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
+sha2 = "0.10.9"
 windows-sys = { version = "0.61.2", features = [
     "Win32_NetworkManagement_IpHelper",
     "Win32_NetworkManagement_Ndis",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
     "Win32_Networking_WinSock",
     "Win32_Networking_WinHttp",
     "Win32_System_IO",
     "Win32_System_Console",
+    "Win32_UI_Shell",
 ] }

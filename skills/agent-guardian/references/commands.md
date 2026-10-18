@@ -4,7 +4,7 @@ This reference follows the current development build. Commands can change before
 
 ## Runtime availability
 
-The skill can be installed independently with the Skills CLI. The runtime is not distributed yet. Do not imply that the Skills CLI installs guardian.
+The skill can be installed independently with the Skills CLI. No public runtime artifact is currently distributed. Do not imply that the Skills CLI installs guardian.
 
 ## Available development commands
 
@@ -20,7 +20,9 @@ The skill can be installed independently with the Skills CLI. The runtime is not
 - guardian start --allow-battery: permit a battery or unknown-power-source lease, capped at five minutes.
 - Guardian reads `%LOCALAPPDATA%\AgentGuardian\config.toml` when present. `--config PATH` overrides that location; it never creates a config file.
 - guardian version: print the runtime version.
+- guardian install --sha256 DIGEST: verify this executable against a trusted SHA-256, then install or upgrade it under `%LOCALAPPDATA%\Programs\AgentGuardian`. It makes no PATH, startup, service, configuration, or log changes and does not request elevation.
+- guardian uninstall: remove the installed executable while preserving config and logs. Run it from a different Guardian executable after closing other instances; it refuses to delete its own running image.
 
 The foreground command exits when the target process exits or the lease expires. Ctrl+C stops Guardian. Battery behavior and locked-session operation still require hardware verification. See the repository configuration guide for the 64 KiB file limit and the persistent battery opt-in behavior.
 
-The foreground monitor observes local interface and route metadata only. Continuous DNS/VPN/upstream observation, network recovery, persistent installer, background service, and stop command are not available in the current build. The one-shot `--probe` can suspect a captive portal from a redirect or unexpected NCSI response but does not identify VPN state or configured remote-service failures. ICMP filtering leaves gateway reachability unknown and prevents a `HEALTHY` classification. `guardian doctor` remains usable without elevation and includes a warning if Windows denies one diagnostic. Session events remain local and bounded; an interrupted session is reported without a fabricated protected duration.
+The foreground monitor observes local interface and route metadata only. Continuous DNS/VPN/upstream observation, network recovery, background service, and stop command are not available in the current build. The installer accepts a supplied digest but cannot establish the publisher or provenance of an executable; no official runtime checksum or release has been published. The one-shot `--probe` can suspect a captive portal from a redirect or unexpected NCSI response but does not identify VPN state or configured remote-service failures. ICMP filtering leaves gateway reachability unknown and prevents a `HEALTHY` classification. `guardian doctor` remains usable without elevation and includes a warning if Windows denies one diagnostic. Session events remain local and bounded; an interrupted session is reported without a fabricated protected duration. See the [runtime installation guide](../../../docs/development/installation.md).

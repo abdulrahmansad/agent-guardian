@@ -21,6 +21,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 
+mod install;
 mod monitor;
 mod probes;
 mod signals;
@@ -348,6 +349,14 @@ pub fn start(
     println!("Lease expired; releasing the power request.");
     active_lease.finish(ReleaseReason::TtlExpired)?;
     Ok(())
+}
+
+pub fn install(json: bool, expected_sha256: &str) -> Result<(), String> {
+    install::install(json, expected_sha256)
+}
+
+pub fn uninstall(json: bool) -> Result<(), String> {
+    install::uninstall(json)
 }
 
 fn unix_time_ms() -> u64 {

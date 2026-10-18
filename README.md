@@ -4,7 +4,7 @@
 
 Agent Guardian is an early-stage Windows project for protecting long-running local AI coding sessions from idle sleep and transient connectivity failures. It combines a portable Agent Skill, an independent Rust runtime, and a conservative Windows integration.
 
-The repository currently contains an experimental foreground power-lease implementation, bounded local session event storage, JSON/human session reports, a read-only local network snapshot, a bounded foreground monitor for local IP-interface and route changes, an explicitly requested one-shot connectivity check, and deterministic policy core. Network recovery, runtime installer, and end-to-end Codex installation have not been completed. Do not rely on this development build for unattended production work.
+The repository currently contains an experimental foreground power-lease implementation, bounded local session event storage, JSON/human session reports, a read-only local network snapshot, a bounded foreground monitor for local IP-interface and route changes, an explicitly requested one-shot connectivity check, deterministic policy core, and a checksum-verified per-user executable installer. Network recovery, a published runtime package, and end-to-end Codex installation have not been completed. Do not rely on this development build for unattended production work.
 
 ## The use case
 
@@ -23,11 +23,11 @@ These are project goals. The status section below identifies what the current de
 
 ## Project status
 
-This repository is under active development. The current Windows CLI can request a bounded system-required power lease, inspect Windows power diagnostics, and refuse battery operation unless explicitly enabled. The core includes validated TOML configuration types, PID plus process-creation identity leases, conservative connectivity classification, and pure recovery decisions.
+This repository is under active development. The current Windows CLI can request a bounded system-required power lease, inspect Windows power diagnostics, refuse battery operation unless explicitly enabled, and install or upgrade a per-user executable after checking its SHA-256. The core includes validated TOML configuration types, PID plus process-creation identity leases, conservative connectivity classification, and pure recovery decisions.
 
-The default network command reports a privacy-limited local adapter snapshot and sends no probes. `guardian monitor` is a separate, explicit foreground listener for local IP-interface and route changes. It runs for at most 60 minutes, takes a local fallback snapshot every five minutes by default, and sends no DNS, HTTP, or ICMP probes. `guardian network --probe` is an explicit, one-shot opt-in that resolves two fixed names, reads active default-route state, attempts a bounded ICMP echo to each usable gateway family, checks two fixed public endpoints, and shows a preliminary deterministic assessment. The assessment can report `HEALTHY` only when DNS, route, gateway, and both independent endpoint checks all succeed. VPN-state classification, network recovery, and persistent/background monitoring are not implemented. There is no service, IPC endpoint, autostart entry, updater, or release installer.
+The default network command reports a privacy-limited local adapter snapshot and sends no probes. `guardian monitor` is a separate, explicit foreground listener for local IP-interface and route changes. It runs for at most 60 minutes, takes a local fallback snapshot every five minutes by default, and sends no DNS, HTTP, or ICMP probes. `guardian network --probe` is an explicit, one-shot opt-in that resolves two fixed names, reads active default-route state, attempts a bounded ICMP echo to each usable gateway family, checks two fixed public endpoints, and shows a preliminary deterministic assessment. The assessment can report `HEALTHY` only when DNS, route, gateway, and both independent endpoint checks all succeed. VPN-state classification, network recovery, and persistent/background monitoring are not implemented. There is no service, IPC endpoint, autostart entry, or updater. The per-user installer is implemented, but no runtime release artifact or trusted release checksum is available yet.
 
-See [development status](docs/STATUS.md), [acceptance matrix](docs/testing/acceptance.md), and [threat model](docs/security/threat-model.md).
+See [development status](docs/STATUS.md), [acceptance matrix](docs/testing/acceptance.md), [threat model](docs/security/threat-model.md), and the [local release preparation checklist](docs/release/README.md). A read-only [development demo](demos/unattended-session.md) is also available.
 
 ## Features
 
@@ -66,7 +66,7 @@ Replace 1234 with the process ID. The lease ends when that process exits or the 
 
 | Platform | Status |
 |---|---|
-| Windows 11 x64 | Development target; source is being built on Windows 11 x64. Power behavior and locked-session behavior have not been hardware-validated. |
+| Windows 11 x64 | Development target; source and installer file operations are tested on Windows 11 x64. Power behavior and locked-session behavior have not been hardware-validated. |
 | Windows 10 x64 | Not tested |
 | Windows ARM64 | Not tested |
 | macOS / Linux | Core design is platform-independent; runtime is unsupported |
@@ -82,7 +82,15 @@ Windows sleep behavior depends on device firmware, power policy, and sleep model
 
 ## Installation and permissions
 
-The Agent Skill and the Windows runtime are separate installations. Skills CLI installation is designed to copy skill guidance into the selected agent's project or user skill directory. Runtime setup will use a verified per-user release package. The current development build has no persistent installer and does not require elevation.
+The Agent Skill and the Windows runtime are separate installations. Skills CLI installation copies skill guidance into the selected agent's project or user skill directory. The Windows installer accepts the SHA-256 of the executable being run and copies it to `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe`. It does not require elevation or change PATH, startup settings, power plans, services, configuration, or logs. Upgrades use the same command with a new verified executable. Close running Guardian instances before upgrading.
+
+No runtime release has been published yet. The current local GNU/LLVM build depends on `libunwind.dll`; the installer copies only `guardian.exe`, so do not install that development build as a standalone runtime. Use `cargo run` for local development. A Windows x64 MSVC build can be installed after its runtime dependencies have been checked on a clean Windows environment and its digest computed with PowerShell:
+
+    $exe = (Resolve-Path '.\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
+    $sha256 = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+    & $exe install --sha256 $sha256
+
+This local hash confirms the bytes copied into the install directory; it does not verify who built the executable. For a future release, use the checksum distributed with the release and verify that release through a trusted source. See the [runtime installation guide](docs/development/installation.md).
 
 No service, SYSTEM process, machine-wide power-plan change, firewall change, DNS change, or adapter restart is installed by the current build.
 
@@ -117,7 +125,7 @@ The [configuration example](config.example.toml) documents validated defaults. `
 
 Guardian has no account requirement or mandatory telemetry. The default CLI does not send network probes. When `guardian network --probe` is used, it makes two fixed web requests through Windows automatic proxy settings, resolves their fixed hostnames through the Windows DNS namespace, reads the local route table, and may send a bounded ICMP echo to a selected default gateway. The Microsoft NCSI check uses plain HTTP; at most 64 response bytes are compared in memory and discarded. The Cloudflare check uses HTTPS and reads only the status code. Gateway IP addresses are used transiently for route and ICMP checks, then discarded; Guardian does not display or persist them. Probe results and response bodies are not written to the journal. Guardian does not persist Wi-Fi passwords, SSIDs, adapter names, IP addresses, API keys, tokens, or traffic. Power session events are kept locally in `%LOCALAPPDATA%\AgentGuardian` with bounded rotation; records contain only a session UUID, timestamps, and typed lease events.
 
-The initial design avoids privilege elevation and arbitrary shell commands. See the [threat model](docs/security/threat-model.md) before relying on future recovery features. Report vulnerabilities through a private GitHub Security Advisory when the repository enables that feature.
+The initial design avoids privilege elevation and arbitrary shell commands. The installer relies on a user-supplied SHA-256 and does not authenticate publisher identity. See the [threat model](docs/security/threat-model.md) before relying on future recovery features. Report vulnerabilities through a private GitHub Security Advisory when the repository enables that feature.
 
 ## Limitations
 
@@ -133,7 +141,7 @@ The initial design avoids privilege elevation and arbitrary shell commands. See 
 
 ## FAQ
 
-**Does installing the skill install a Windows service?** No. The skill is guidance for a coding agent. Runtime installation is separate, and the current build has no service or persistent installer.
+**Does installing the skill install a Windows service?** No. The skill is guidance for a coding agent. Runtime installation is separate; the runtime installer copies one executable into the current user's profile and installs no service.
 
 **Will the screen stay on?** Guardian requests system wakefulness only. It does not request the display to stay on.
 
@@ -145,7 +153,7 @@ The initial design avoids privilege elevation and arbitrary shell commands. See 
 
 ## Uninstallation
 
-The current development build creates no persistent runtime installation. Stop it with Ctrl+C or let its lease expire. Windows closes the request handle when the process exits. Local event files remain under `%LOCALAPPDATA%\AgentGuardian`; remove that directory if you also want to delete Guardian's local history. Remove the Agent Skill using the Skills CLI's documented removal command for the selected agent after its install workflow has been validated.
+Run `guardian uninstall` from a different Guardian executable, such as a local development build or a downloaded release file, after closing other Guardian instances. The command removes only `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe` and removes that directory only if empty. It refuses to delete the executable that is currently running. Configuration, logs, and reports under `%LOCALAPPDATA%\AgentGuardian` are preserved. Remove that directory separately only if you also want to delete Guardian's local history. Remove the Agent Skill separately using the Skills CLI's removal command for the selected agent.
 
 ## Contributing
 

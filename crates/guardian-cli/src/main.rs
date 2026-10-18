@@ -74,11 +74,15 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Explain the current runtime installation state.
-    Install,
-    /// Explain how to remove the current runtime installation.
+    /// Install or upgrade this verified executable in the current user's profile.
+    Install {
+        /// SHA-256 copied from a trusted release checksum source.
+        #[arg(long)]
+        sha256: String,
+    },
+    /// Remove the per-user runtime executable without deleting local data.
     Uninstall,
-    /// Stop a background Guardian runtime, if one is installed.
+    /// Not available while Guardian runs in the foreground; stop it with Ctrl+C in its terminal.
     Stop,
     /// Show the Guardian version.
     Version,
@@ -126,8 +130,18 @@ fn main() -> ExitCode {
         }
         Command::Logs { config } => platform_logs(args.json, config),
         Command::Report { output, config } => platform_report(output, args.json, config),
-        Command::Install => Err("runtime installation is not available until a verified release package exists. The Agent Skill and Windows runtime are separate installs.".into()),
-        Command::Uninstall => Err("no persistent runtime installation was found or created by this development build.".into()),
+        Command::Install { sha256 } => {
+            #[cfg(windows)]
+            { windows::install(args.json, &sha256) }
+            #[cfg(not(windows))]
+            { let _ = (args.json, sha256); Err("guardian install is supported only on Windows".into()) }
+        }
+        Command::Uninstall => {
+            #[cfg(windows)]
+            { windows::uninstall(args.json) }
+            #[cfg(not(windows))]
+            { let _ = args.json; Err("guardian uninstall is supported only on Windows".into()) }
+        }
         Command::Stop => Err("Guardian runs in the foreground in this development build. Press Ctrl+C in its owning terminal to release the lease.".into()),
     };
 
@@ -379,5 +393,15 @@ mod tests {
         assert!(validate_monitor_options(61, 300).is_err());
         assert!(validate_monitor_options(60, 29).is_err());
         assert!(validate_monitor_options(60, 3601).is_err());
+    }
+
+    #[test]
+    fn installer_requires_an_explicit_sha256() {
+        assert!(Args::try_parse_from(["guardian", "install"]).is_err());
+        let args =
+            Args::try_parse_from(["guardian", "--json", "install", "--sha256", &"a".repeat(64)])
+                .unwrap();
+        assert!(matches!(args.command, Command::Install { .. }));
+        assert!(Args::try_parse_from(["guardian", "uninstall"]).is_ok());
     }
 }

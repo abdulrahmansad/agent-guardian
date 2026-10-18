@@ -46,16 +46,26 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Ran the Windows local-only `guardian --json network` smoke check. It reported `external_probes_attempted: false`, `internet_connectivity_tested: false`, and `network_settings_changed: false`; no live `--probe` was run.
 - [x] After adding the foreground monitor: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace --all-targets -j 1` passed (38 core tests, 13 CLI tests). The documentation checker covered 18 Markdown files, official skill validation passed, local Skills CLI discovery found one skill, and `cargo audit` scanned 58 dependencies without advisories.
 - [x] Ran `guardian --json monitor --duration-minutes 1 --interval-seconds 30` on Windows 11 x64. It registered both notifications, emitted an aggregate-only initial snapshot, completed its bounded run, and emitted a stopped record. No local state change occurred during the run; actual event delivery remains unverified.
+- [x] Added `guardian install --sha256` and `guardian uninstall` for per-user executable install, upgrade, and removal. Installer tests on Windows used disposable paths (including spaces and non-ASCII characters) and covered checksum failure, upgrade, scoped removal, and the same-path/hard-link self-uninstall guard logic.
+- [x] Installer tests and the full Rust workspace test suite passed on the Windows GNU/LLVM toolchain after the per-user install changes; formatting and Clippy with warnings denied also passed.
+- [x] Rehashed the closed staged installer file before replacement and added a Windows file-identity guard plus tests for hard-link self-uninstall aliases.
+- [x] Focused security review of installer/package paths confirmed the installer has no elevation or download path, verifies staged bytes, and limits replacement/removal to the fixed per-user executable; same-user path races and dynamic DLL loading remain documented limitations.
+- [x] Added a deterministic local Windows x64 release packager, checksum sidecars, tests for reproducible output, architecture checks, and normal/delay-load import-dependency rejection, a release gate checklist, launch-copy drafts, and a safe read-only demo guide.
+- [x] After the installer rehash and hard-link changes, `cargo fmt --all --check`, Clippy with warnings denied, and the Windows workspace tests passed (23 CLI/Windows tests and 38 core tests).
+- [x] The docs link checker covered 19 Markdown files; official Agent Skills validation passed; local Skills CLI discovery found one skill; `cargo package --workspace --no-verify --allow-dirty` packaged both crates; `cargo audit` scanned 66 locked dependencies without advisories.
+- [x] The Python package tests passed and verified deterministic ZIP output, executable architecture validation, and rejection of non-system DLLs in both normal and delay-load import tables.
+- [x] Final local validation for this slice: formatting, Clippy, 23 CLI/Windows tests, 38 core tests, five release-packager tests, 22-file Markdown link checking, Agent Skills validation, local Skills CLI discovery, crate packaging, and `cargo audit` over 66 dependencies passed. The real MSVC build/package step is now in CI but has not run on the hosted workflow.
 
 ## In progress
 
-- [ ] Build verified runtime installation, upgrade, and removal flows without unnecessary elevation.
 - [ ] Validate the CI dependency/security and documentation checks on a hosted Windows runner.
+- [ ] Complete an install/upgrade/removal audit in a clean-user Windows VM using a release executable and independently trusted checksum.
 
 ## Remaining work
 
 - [ ] Implement any network recovery only after evidence, explicit authorization, retry budgets, and controlled hardware testing are in place.
 - [ ] Validate published GitHub installation and Codex skill installation/uninstallation after the remote is configured and published.
+- [ ] Build and exercise the actual MSVC release executable in a clean Windows environment; the import-table screening helper alone cannot prove runtime dependency closure. Do not publish artifacts without required authorization.
 - [ ] Perform Windows power request lifecycle, crash cleanup, battery transition, display-off, and locked-session checks on representative hardware.
 - [ ] Measure idle CPU, memory, probe frequency, startup latency, event latency, and bounded log growth before making performance claims.
 - [ ] Complete the acceptance matrix, security review, release packaging/checksums, demo, and launch copy.
@@ -68,9 +78,12 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - `powercfg /requests` requires an elevated shell on this host. `guardian doctor` reports the unavailable field and continues; `guardian status` returns the command's permission error.
 - The default local network snapshot uses `GetAdaptersAddresses`. The `--probe` option has not been run against a live network; DNS resolver, route, ICMP, proxy behavior (including a real HTTP 407), and total runtime are not hardware-validated.
 - The core recovery planner is deterministic policy only. DNS, route, gateway, and web outcomes feed the classifier, but there is no reconnection or adapter restart. The foreground monitor observes local interface/route changes only; actual notification delivery on a controlled network has not been tested.
-- Installer, updater, service/IPC, and agent runtime integration are not implemented. Reports currently include power lease events only; network settings in the config are reserved and have no runtime effect.
+- Installer and uninstaller file operations are implemented and tested only in disposable temporary directories. No public runtime artifact/checksum exists; clean-user installation, replacement of a running executable, and release-based removal remain untested. There is no updater, service/IPC, or agent runtime integration. Reports currently include power lease events only; network settings in the config are reserved and have no runtime effect.
+- The installer rechecks and rehashes its closed staging file and compares Windows file identity to avoid self-uninstall through a hard link. A focused review recorded same-user concurrent filesystem tampering and ancestor-path races as residual limitations; the installer does not elevate, but these remain in the full pre-release security review. A supplied digest does not authenticate the artifact publisher.
 - The CI workflow has not run on GitHub. The repository remote has no refs, so hosted CI and public Skills CLI install cannot be verified.
-- No actual locked-session, Modern Standby/S3 sleep, battery, Wi-Fi recovery, installer, or real-agent integration acceptance run has been performed.
+- The Rust 1.89 local cross-check could not link Windows GNU build scripts because the available LLVM-MinGW runtime lacks GCC support libraries; the workflow's 1.89 MSVC check is the authoritative remaining MSRV validation and has not run on GitHub.
+- The local optimized GNU/LLVM executable imports `libunwind.dll`; launching it requires the LLVM-MinGW runtime on `PATH`, and the current installer copies only `guardian.exe`. The release packager correctly rejects this binary. The MSVC artifact has not yet been built or exercised, and the static/delay-load import screen cannot detect dynamic DLL loading.
+- No actual locked-session, Modern Standby/S3 sleep, battery, live Wi-Fi recovery, real-profile installer, clean-user installer, or real-agent integration acceptance run has been performed. Installer file operations were tested in disposable directories.
 
 ## Human-only or external gates
 
@@ -80,4 +93,4 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## Next concrete action
 
-Build verified per-user runtime installation, upgrade, and removal flows. Keep network-changing behavior disabled until its evidence and authorization path are complete.
+Build and exercise the Windows x64 MSVC package on a suitable runner, then complete the hardware and hosted-CI acceptance gates. Do not describe the artifact as self-contained until clean-environment runtime checks pass. Keep network-changing behavior disabled until its evidence and authorization path are complete.
