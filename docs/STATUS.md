@@ -75,12 +75,12 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] The optimized local GNU/LLVM Windows build succeeded after hardening and reports version 0.1.0. The local release packager correctly rejected it because it imports `libunwind.dll`; the standalone MSVC release check remains open.
 - [x] Added `guardian stop` for active foreground power leases in the current Windows user session. The named event uses a protected user-SID DACL and a session-specific, hashed name; Guardian checks the existing event owner and exact DACL before using it and refuses a pre-created broad-ACL event. A stop request does not claim release is complete. Windows-target tests verify ACL rejection, signaling, and waiter wakeup without acquiring a power request.
 - [x] Verified public Skills CLI discovery, disposable Codex project installation/listing, and default project-scoped removal; the project skill list was empty after removal.
-- [x] Created the public draft PR for the authorized hardening branch. Hosted CI has not completed yet.
+- [x] Created the public draft PR for the authorized hardening branch. The first hosted Windows run passed formatting, Clippy, and the Rust 1.89 check, but its stop-event test exposed that elevated runners can assign a different default owner to a newly created event. Stop-event creation now sets the current user's SID as owner explicitly; the local Windows-target suite passes, and hosted revalidation is pending.
 - [x] Final stop-command validation passed: formatting, Clippy with warnings denied, Windows-target workspace tests (38 CLI and 38 core), 23-file documentation-link check, Agent Skills validation, six package tests, and Rust crate packaging.
 
 ## In progress
 
-- [ ] Validate the CI dependency/security and documentation checks on a hosted Windows runner.
+- [ ] Rerun hosted Windows CI after setting the stop event owner explicitly; the first run stopped at the Windows unit tests, so packaging, documentation, Skills, and dependency scans have not run there yet.
 - [ ] Complete an install/upgrade/removal audit in a clean-user Windows VM using a release executable and independently trusted checksum.
 - [ ] Repeat foreground-monitor resource measurements on other supported Windows configurations; the current measurements are from one Windows 11 x64 host.
 

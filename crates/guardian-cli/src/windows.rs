@@ -374,7 +374,9 @@ struct SecurityDescriptor(LocalAllocation);
 
 impl SecurityDescriptor {
     fn for_user(sid: &str) -> Result<Self, String> {
-        let sddl = format!("D:P(A;;0x{:08x};;;{sid})", STOP_EVENT_ACCESS);
+        // Set the event owner explicitly. On elevated Windows runners the
+        // token's default owner can be Administrators rather than TokenUser.
+        let sddl = format!("O:{sid}D:P(A;;0x{:08x};;;{sid})", STOP_EVENT_ACCESS);
         Self::from_sddl(&sddl)
     }
 
