@@ -72,6 +72,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Fixed three issues from the final security review: power-request command output is discarded and diagnostics reveal only availability; adapter observations follow and validate Windows' linked list; and PID-bound leases require the target process to share Guardian's user SID and session. Focused tests cover redaction, sparse/invalid/cyclic adapter lists, owner/session policy, and querying the current process token.
 - [x] Final local validation after those fixes passed: formatting; Clippy with warnings denied; Windows GNU/LLVM workspace tests (35 CLI/Windows and 38 core); documentation links (23 Markdown files); Agent Skills validation; six release-packager tests; Skills CLI discovery; crate packaging; and `cargo audit` over 66 locked dependencies.
 - [x] Updated README and Agent Skill command guidance to match the same-user/same-session process restriction and redacted power diagnostics. A non-elevated `guardian status` smoke check returned a generic error with `/requests` output suppressed; the successful elevated-query path remains NOT TESTED.
+- [x] The optimized local GNU/LLVM Windows build succeeded after hardening and reports version 0.1.0. The local release packager correctly rejected it because it imports `libunwind.dll`; the standalone MSVC release check remains open.
 
 ## In progress
 
