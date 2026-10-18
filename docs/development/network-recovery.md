@@ -2,6 +2,8 @@
 
 `guardian network --reconnect-saved-wifi` is an explicit, one-shot request to reconnect with an existing Windows Wi-Fi profile. The command may change the active wireless connection. It is separate from `guardian network --probe` and cannot be combined with it. The foreground monitor does not call this recovery path, and adapter restart is not implemented.
 
+Guardian does not infer that a disconnect was accidental. Windows' documented connection-notification payload contains profile-name, SSID, and profile-XML fields; its reason code describes operation failures and is reported as success for connection-related notifications other than `wlan_notification_acm_connection_complete`. Guardian does not register for these notifications or inspect their payload. Automatic reconnection remains disabled until user-intent handling and privacy-safe behavior are demonstrated on controlled hardware. This is an inference from the documented API fields and their stated semantics, not a claim that Windows has no other diagnostic source.
+
 ## Preconditions
 
 Guardian requests a connection only when all of these checks pass:
@@ -29,3 +31,5 @@ The policy and request sequence are covered by deterministic mock-backend tests.
 - [WlanConnect](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanconnect) submits a connection attempt and returns immediately; notification or follow-up state is needed to determine its result. It requires access to all-user profiles when applicable.
 - [WlanGetProfileList](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlangetprofilelist) returns basic profile information in preference order and requires the caller to free its returned memory with `WlanFreeMemory`.
 - [WlanGetProfile](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlangetprofile) can return plaintext key material when a specific flag is requested. Guardian does not call this API.
+- [WLAN_CONNECTION_NOTIFICATION_DATA](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/ns-wlanapi-wlan_connection_notification_data) documents the profile name, SSID, profile XML, and reason-code fields in connection notifications.
+- [WlanRegisterNotification](https://learn.microsoft.com/en-us/windows/win32/api/wlanapi/nf-wlanapi-wlanregisternotification) registers callbacks for Native Wi-Fi notifications. Guardian does not register for these notifications.

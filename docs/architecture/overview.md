@@ -56,9 +56,9 @@ The saved Wi-Fi recovery implementation uses the Native Wi-Fi API. It reads the 
 ### ADR-004: Keep saved-profile reconnection explicitly one-shot
 
 - **Status:** Accepted.
-- **Context:** Automatically reconnecting can override user intent or disturb another healthy route. A profile name is also local network metadata that should not enter logs or output.
+- **Context:** Automatically reconnecting can override user intent or disturb another healthy route. A profile name is also local network metadata that should not enter logs or output. Windows Native Wi-Fi notifications include profile-name, SSID, and profile-XML fields; the documented reason field describes operation failures and does not provide a reliable intentional-disconnect signal for ordinary disconnected notifications.
 - **Decision:** Provide a separate `--reconnect-saved-wifi` command option, refuse unless local evidence confirms a disconnected Wi-Fi interface and no active route, require exactly one disconnected Native Wi-Fi interface, and try its first Windows-preferred saved profile once. Keep the profile name only in memory and do not automate this action from the monitor.
-- **Consequences:** This creates a testable native connection request without broad network mutation. It does not establish Internet access, and controlled hardware validation is still required before making reliability claims or adding automatic recovery.
+- **Consequences:** This creates a testable native connection request without broad network mutation. It does not establish Internet access, and controlled hardware validation is still required before making reliability claims or adding automatic recovery. The notification payload privacy and ambiguous disconnect cause are documented in the [recovery guide](../development/network-recovery.md).
 
 ## Power behavior evidence
 

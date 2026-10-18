@@ -59,6 +59,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Added an explicit one-shot saved-profile Wi-Fi reconnect with no monitor-triggered recovery or adapter restarts. A read-only security review identified and fixed state revalidation, confirmation-window wording, result preservation after refresh failure, and profile-name privacy handling.
 - [x] Revalidated this reconnect slice on Windows x64: `cargo fmt --all --check`, Clippy with warnings denied, all 38 core and 28 CLI/Windows tests, six package-release tests, 23-file Markdown link checking, Agent Skills validation, Skills CLI local discovery, crate packaging, and `cargo audit` over 66 dependencies passed.
 - [x] Built and launched the local GNU/LLVM release executable; `guardian --version` succeeded. The packaging screen now recognizes `wlanapi.dll` as a Windows system dependency, while correctly rejecting the remaining `libunwind.dll` dependency.
+- [x] Captured a bounded read-only monitor sample on Windows 11 x64: 60.66 seconds, 0.062 CPU seconds, and an 8.25 MiB sampled peak working set across 111 half-second samples. The monitor emitted initial/stopped aggregate snapshots and no stderr; this is one local sample, not a general performance claim.
 - [x] Installed the skill with the Skills CLI into a disposable Codex project using copy mode, then listed it successfully. The temporary project was removed; no user profile or repository skill directory was changed.
 - [x] Measured ten launches of the optimized local GNU/LLVM build's `--version` command: 21.04 ms median, 17.28–471.40 ms range. This is a local development-host sample, not a release performance claim.
 
@@ -66,7 +67,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 - [ ] Validate the CI dependency/security and documentation checks on a hosted Windows runner.
 - [ ] Complete an install/upgrade/removal audit in a clean-user Windows VM using a release executable and independently trusted checksum.
-- [ ] Repeat CPU and memory measurements for the foreground monitor on an awake host; the attempted capture did not produce a valid continuous sample.
+- [ ] Measure longer foreground-monitor runs and repeat on other supported Windows configurations; the current one-minute sample is only a local baseline.
 
 ## Remaining work
 
