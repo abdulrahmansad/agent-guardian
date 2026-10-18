@@ -16,6 +16,7 @@ WinHTTP receives 2-second per-stage settings for name resolution, connection, se
 - A redirect or an unexpected NCSI response marks a captive portal as suspected; it is not proof.
 - A failed request can reflect DNS, proxy, VPN, firewall, endpoint, or upstream problems. Guardian does not distinguish those causes from these two checks alone.
 - A successful response proves only that the particular endpoint responded. It does not guarantee that GitHub, OpenAI, or another service is available.
+- When the requests are attempted, Guardian passes their fixed success/failure flags and privacy-limited adapter summary into the deterministic core classifier. DNS resolution and gateway reachability remain unknown, so even two successful responses produce a preliminary `SUSPECT` assessment rather than `HEALTHY`.
 - Probe results are displayed only. They are not logged and never authorize Wi-Fi reconnection or adapter restart.
 - The probes were not run against this workstation's live network during development. Their real network behavior remains **NOT TESTED**.
 

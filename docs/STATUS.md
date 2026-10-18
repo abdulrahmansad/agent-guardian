@@ -18,6 +18,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Added a Windows local network snapshot that reports Wi-Fi adapter operational state and gateway presence without exposing adapter names, SSIDs, addresses, or sending probes.
 - [x] Added privacy-limited local summary flags for tunnel-type interfaces; the signal does not claim that a VPN is active.
 - [x] Added `guardian network --probe` as an explicit two-request one-shot diagnostic using Windows automatic proxy selection. Redirects, server/proxy authentication, cookies, and keep-alive are disabled; response contents are not logged. Real network behavior is not tested.
+- [x] Integrated explicit probe outcomes and local adapter flags with the deterministic classifier. DNS resolution and gateway reachability remain unknown, so endpoint success cannot produce a `HEALTHY` result.
 - [x] Added a locked, bounded local JSONL journal for typed power lease events, with rotation, retention, and human/JSON event output.
 - [x] Added latest-session reports that derive duration only from recorded start/release events and leave interrupted sessions incomplete.
 - [x] Connected validated configuration loading to power-lease defaults/maximums and bounded journal size/retention. Config files are read-only, optional, and limited to 64 KiB.
@@ -36,10 +37,14 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Re-ran `cargo clippy --workspace --all-targets -- -D warnings` after local adapter, journal, and opt-in probe changes; it passed.
 - [x] Re-ran `cargo fmt --all --check`, `python scripts/check-doc-links.py`, official Agent Skills validation, `cargo test`, and `cargo audit` after local adapter, journal, and opt-in probe changes; all passed.
 - [x] Ran a Windows `guardian --json network` smoke check after the change. It returned only booleans/counts, including `tunnel_adapter_detected`, with probes and network changes reported false.
+- [x] Integrated explicit probe outcomes and local adapter flags with the deterministic classifier. DNS resolution and gateway reachability remain unknown, so endpoint success cannot produce a `HEALTHY` result.
+- [x] `cargo fmt --all --check` and `cargo clippy --workspace --all-targets -- -D warnings` passed after classifier integration.
+- [x] `cargo test --workspace --all-targets -j 1` passed 35 core tests and 7 CLI/Windows-probe simulation tests after classifier integration.
+- [x] `python scripts/check-doc-links.py` checked all 17 Markdown files; official `skills-ref` validation, Vercel Skills CLI local discovery, and `cargo audit` over 58 locked dependencies passed after classifier integration.
 
 ## In progress
 
-- [ ] Integrate probe results with deterministic evidence classification and add independent DNS/gateway signals.
+- [ ] Add independent DNS resolution and gateway reachability signals; keep the assessment conservative.
 - [ ] Build a low-frequency, event-driven monitor with explicit opt-in; the current probes are one-shot only.
 - [ ] Build verified runtime installation, upgrade, and removal flows without unnecessary elevation.
 - [ ] Validate the CI dependency/security and documentation checks on a hosted Windows runner.
@@ -59,7 +64,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - The system-required power request has compiled but has not been held in a real user session. Idle sleep, display-off, release, crash cleanup, Win+L, S3, and battery hardware behavior remain unverified.
 - `powercfg /requests` requires an elevated shell on this host. `guardian doctor` reports the unavailable field and continues; `guardian status` returns the command's permission error.
 - The default local network snapshot uses `GetAdaptersAddresses`. The `--probe` option has not been run against a live network; proxy behavior and total runtime are not hardware-validated.
-- The core recovery planner is deterministic policy only. There is no reconnection, adapter restart, continuous monitoring, or integration between probe results and the classifier.
+- The core recovery planner is deterministic policy only. Probe outcomes now feed the classifier, but there is no reconnection, adapter restart, or continuous monitoring. Independent DNS and gateway reachability signals are not implemented.
 - Installer, updater, service/IPC, and agent runtime integration are not implemented. Reports currently include power lease events only; network settings in the config are reserved and have no runtime effect.
 - The CI workflow has not run on GitHub. The repository remote has no refs, so hosted CI and public Skills CLI install cannot be verified.
 - No actual locked-session, Modern Standby/S3 sleep, battery, Wi-Fi recovery, installer, or real-agent integration acceptance run has been performed.
@@ -72,4 +77,4 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## Next concrete action
 
-Integrate the one-shot probe results with independent local DNS and route evidence. Keep network-changing behavior disabled until its evidence and authorization path are complete.
+Add independently collected DNS resolution and gateway reachability evidence. Keep network-changing behavior disabled until its evidence and authorization path are complete.

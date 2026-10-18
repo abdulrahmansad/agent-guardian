@@ -28,6 +28,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 22 | Configured journal size and retention are enforced | PASS | Disposable-directory integration test verifies 1 MiB rotation and removal of a file older than the configured one-day retention |
 | 23 | External connectivity probes require an explicit flag | PASS | CLI parser test verifies `guardian network` defaults to local-only and `--probe` is required; probes were not sent during tests |
 | 24 | Probe behavior under real network, proxy, and captive portal conditions | NOT TESTED | Requires a controlled network; no probe was run against the active workstation |
+| 25 | Explicit probe outcomes map to a conservative connectivity assessment | PASS | Core unit tests verify endpoint success remains `SUSPECT` while DNS/gateway reachability are unknown, and local adapter metadata does not infer a route from an inactive interface; this does not validate live network behavior |
 
 ## Automated test plan
 

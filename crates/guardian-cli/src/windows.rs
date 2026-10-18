@@ -8,9 +8,10 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use guardian_core::{
-    Config, EventStore, LeaseBook, LeaseId, LocalAdapterObservation, LocalNetworkSummary,
-    PowerLeaseDecision, PowerLeasePolicy, PowerLeasePolicyError, PowerSourceClass, ProcessIdentity,
-    ReleaseReason, SessionEvent, SessionEventKind, SessionReport,
+    Config, ConnectivityState, EndpointEvidence, EventStore, LeaseBook, LeaseId,
+    LocalAdapterObservation, LocalNetworkSummary, PowerLeaseDecision, PowerLeasePolicy,
+    PowerLeasePolicyError, PowerSourceClass, ProcessIdentity, ReleaseReason, SessionEvent,
+    SessionEventKind, SessionReport, classify_local_observation,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
@@ -464,6 +465,25 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
         let probes = probes::run_bounded_probes();
         snapshot.external_probes_sent = probes.requests_attempted;
         snapshot.internet_connectivity_tested = probes.requests_attempted;
+        if probes.requests_attempted {
+            let endpoints = [
+                EndpointEvidence {
+                    category: "microsoft_ncsi".to_owned(),
+                    reachable: probes.microsoft_connect_test.reachable,
+                    user_configured_service: false,
+                },
+                EndpointEvidence {
+                    category: "independent_https".to_owned(),
+                    reachable: probes.independent_https.reachable,
+                    user_configured_service: false,
+                },
+            ];
+            snapshot.connectivity_classification = Some(classify_local_observation(
+                &snapshot.summary,
+                &endpoints,
+                probes.captive_portal_suspected,
+            ));
+        }
         snapshot.probes = Some(probes);
     }
     if json {
@@ -490,6 +510,10 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
             snapshot.summary.gateway_address_reported
         );
         println!(
+            "Gateway reported on an operational adapter: {}",
+            snapshot.summary.operational_gateway_address_reported
+        );
+        println!(
             "Tunnel-type interface reported: {}",
             snapshot.summary.tunnel_adapter_detected
         );
@@ -511,6 +535,10 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
                 "Captive portal suspected: {}",
                 probes.captive_portal_suspected
             );
+            if let Some(classification) = snapshot.connectivity_classification {
+                println!("Preliminary connectivity assessment: {classification:?}");
+                println!("DNS resolution and gateway reachability were not tested.");
+            }
         } else {
             println!("No external probes were sent.");
         }
@@ -624,6 +652,8 @@ struct LocalNetworkSnapshot {
     internet_connectivity_tested: bool,
     external_probes_sent: bool,
     network_settings_changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    connectivity_classification: Option<ConnectivityState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     probes: Option<probes::ProbeSummary>,
 }

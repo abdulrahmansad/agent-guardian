@@ -17,6 +17,7 @@ pub struct LocalNetworkSummary {
     pub wifi_adapter_operational: bool,
     pub operational_adapter_count: u32,
     pub gateway_address_reported: bool,
+    pub operational_gateway_address_reported: bool,
     pub wifi_gateway_address_reported: bool,
     pub other_gateway_address_reported: bool,
     /// A tunnel-type interface is only a hint; it does not prove a VPN is active.
@@ -39,6 +40,7 @@ impl LocalNetworkSummary {
             }
             if adapter.default_gateway_reported {
                 summary.gateway_address_reported = true;
+                summary.operational_gateway_address_reported |= adapter.operational;
                 if !adapter.is_wifi {
                     summary.other_gateway_address_reported = true;
                 }
@@ -90,6 +92,7 @@ pub struct ConnectivityEvidence {
     pub gateway_reachable: Option<bool>,
     pub dns_resolves: Option<bool>,
     pub captive_portal_detected: bool,
+    pub captive_portal_suspected: bool,
     pub proxy_restricted: bool,
     pub vpn_state_changed: bool,
     pub adapter_reports_fault: bool,
@@ -98,7 +101,7 @@ pub struct ConnectivityEvidence {
 
 /// Classify observations without making network changes. Missing evidence stays conservative.
 pub fn classify_connectivity(evidence: &ConnectivityEvidence) -> ConnectivityState {
-    if evidence.captive_portal_detected {
+    if evidence.captive_portal_detected || evidence.captive_portal_suspected {
         return ConnectivityState::CaptivePortal;
     }
     if evidence.proxy_restricted {
@@ -173,6 +176,36 @@ pub fn classify_connectivity(evidence: &ConnectivityEvidence) -> ConnectivitySta
         return ConnectivityState::Suspect;
     }
     ConnectivityState::UnknownFailure
+}
+
+/// Conservatively combine local adapter metadata with independent probe outcomes.
+/// DNS and gateway reachability stay unknown because this snapshot does not test them.
+pub fn classify_local_observation(
+    summary: &LocalNetworkSummary,
+    endpoints: &[EndpointEvidence],
+    captive_portal_suspected: bool,
+) -> ConnectivityState {
+    let wifi_connected = if summary.wifi_adapter_operational {
+        Some(true)
+    } else if summary.wifi_adapters_detected && summary.operational_adapter_count == 0 {
+        Some(false)
+    } else {
+        None
+    };
+    let default_route_present = if summary.operational_gateway_address_reported {
+        Some(true)
+    } else if summary.operational_adapter_count == 0 {
+        Some(false)
+    } else {
+        None
+    };
+    classify_connectivity(&ConnectivityEvidence {
+        wifi_connected,
+        default_route_present,
+        captive_portal_suspected,
+        endpoints: endpoints.to_vec(),
+        ..ConnectivityEvidence::default()
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,6 +412,7 @@ mod tests {
         assert!(summary.wifi_adapter_operational);
         assert_eq!(summary.operational_adapter_count, 2);
         assert!(summary.gateway_address_reported);
+        assert!(summary.operational_gateway_address_reported);
         assert!(summary.wifi_gateway_address_reported);
         assert!(!summary.other_gateway_address_reported);
         assert!(summary.tunnel_adapter_detected);
@@ -403,7 +437,104 @@ mod tests {
         assert!(!summary.wifi_adapter_operational);
         assert_eq!(summary.operational_adapter_count, 0);
         assert!(!summary.gateway_address_reported);
+        assert!(!summary.operational_gateway_address_reported);
         assert!(!summary.tunnel_adapter_detected);
+    }
+
+    #[test]
+    fn gateway_on_inactive_adapter_does_not_imply_an_operational_route() {
+        let summary = LocalNetworkSummary::from_adapters([
+            LocalAdapterObservation {
+                is_wifi: true,
+                is_tunnel: false,
+                operational: true,
+                default_gateway_reported: false,
+            },
+            LocalAdapterObservation {
+                is_wifi: false,
+                is_tunnel: false,
+                operational: false,
+                default_gateway_reported: true,
+            },
+        ]);
+
+        assert!(summary.gateway_address_reported);
+        assert!(!summary.operational_gateway_address_reported);
+        assert_eq!(
+            classify_local_observation(&summary, &[], false),
+            ConnectivityState::UnknownFailure
+        );
+    }
+
+    #[test]
+    fn endpoint_success_without_dns_and_gateway_tests_stays_suspect() {
+        let summary = LocalNetworkSummary {
+            wifi_adapters_detected: true,
+            wifi_adapter_operational: true,
+            operational_adapter_count: 1,
+            gateway_address_reported: true,
+            wifi_gateway_address_reported: true,
+            ..LocalNetworkSummary::default()
+        };
+        assert_eq!(
+            classify_local_observation(&summary, &two_independent(true), false),
+            ConnectivityState::Suspect
+        );
+    }
+
+    #[test]
+    fn local_observation_does_not_infer_route_from_gateway_absence() {
+        let connected_without_route = LocalNetworkSummary {
+            wifi_adapters_detected: true,
+            wifi_adapter_operational: true,
+            operational_adapter_count: 1,
+            ..LocalNetworkSummary::default()
+        };
+        assert_eq!(
+            classify_local_observation(&connected_without_route, &[], false),
+            ConnectivityState::UnknownFailure
+        );
+
+        let wifi_down = LocalNetworkSummary {
+            wifi_adapters_detected: true,
+            operational_adapter_count: 0,
+            ..LocalNetworkSummary::default()
+        };
+        assert_eq!(
+            classify_local_observation(&wifi_down, &[], false),
+            ConnectivityState::WifiDisconnected
+        );
+    }
+
+    #[test]
+    fn inactive_wifi_does_not_override_an_operational_wired_route() {
+        let summary = LocalNetworkSummary {
+            wifi_adapters_detected: true,
+            operational_adapter_count: 1,
+            gateway_address_reported: true,
+            operational_gateway_address_reported: true,
+            other_gateway_address_reported: true,
+            ..LocalNetworkSummary::default()
+        };
+        assert_eq!(
+            classify_local_observation(&summary, &two_independent(true), false),
+            ConnectivityState::Suspect
+        );
+    }
+
+    #[test]
+    fn portal_suspicion_is_classified_without_proving_the_portal_identity() {
+        let summary = LocalNetworkSummary {
+            wifi_adapters_detected: true,
+            wifi_adapter_operational: true,
+            operational_adapter_count: 1,
+            gateway_address_reported: true,
+            ..LocalNetworkSummary::default()
+        };
+        assert_eq!(
+            classify_local_observation(&summary, &[], true),
+            ConnectivityState::CaptivePortal
+        );
     }
 
     fn authorized() -> RecoveryContext {
