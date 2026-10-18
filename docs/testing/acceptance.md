@@ -27,8 +27,9 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 21 | Default local snapshot omits identifiers and changes no settings | PASS | Windows 11 x64 CLI smoke test showed counts/booleans only; a pure core test covers adapter summary aggregation; the default command does not call the probe executor |
 | 22 | Configured journal size and retention are enforced | PASS | Disposable-directory integration test verifies 1 MiB rotation and removal of a file older than the configured one-day retention |
 | 23 | External connectivity probes require an explicit flag | PASS | CLI parser test verifies `guardian network` defaults to local-only and `--probe` is required; probes were not sent during tests |
-| 24 | Probe behavior under real network, proxy, and captive portal conditions | NOT TESTED | Requires a controlled network; no probe was run against the active workstation |
-| 25 | Explicit probe outcomes map to a conservative connectivity assessment | PASS | Core unit tests verify endpoint success remains `SUSPECT` while DNS/gateway reachability are unknown, and local adapter metadata does not infer a route from an inactive interface; this does not validate live network behavior |
+| 24 | Probe behavior under real DNS, route, gateway, proxy, and captive-portal conditions | NOT TESTED | Requires a controlled network; no probe was run against the active workstation |
+| 25 | Connectivity assessment requires DNS, active default route, gateway response, and two independent endpoints before reporting healthy | PASS | Core tests verify complete evidence can classify `HEALTHY`, missing DNS/route/gateway evidence stays conservative, and gateway metadata from an inactive interface does not imply an operational route; live behavior remains untested |
+| 26 | Explicit proxy authentication rejection is classified without retrying or changing settings | PASS | HTTP status interpretation and core policy tests cover `407` → `PROXY_RESTRICTED` → `NotifyUser`; live proxy behavior remains untested |
 
 ## Automated test plan
 

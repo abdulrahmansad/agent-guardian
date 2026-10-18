@@ -14,7 +14,7 @@ pub use network::{
     AdapterRestartBudget, ConnectivityEvidence, ConnectivityState, EndpointEvidence,
     LocalAdapterObservation, LocalNetworkSummary, MAX_ADAPTER_RESTARTS_PER_WINDOW, RecoveryAction,
     RecoveryContext, RestartBudgetExhausted, RetryBackoff, classify_connectivity,
-    classify_local_observation, decide_recovery,
+    classify_local_evidence, classify_local_observation, decide_recovery,
 };
 pub use power::{PowerLeaseDecision, PowerLeasePolicy, PowerLeasePolicyError, PowerSourceClass};
 pub use report::{Incident, IncidentKind, SessionReport};

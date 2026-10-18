@@ -23,4 +23,5 @@ windows-sys = { version = "0.61.2", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_Networking_WinHttp",
+    "Win32_System_IO",
 ] }

@@ -8,10 +8,10 @@ use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use guardian_core::{
-    Config, ConnectivityState, EndpointEvidence, EventStore, LeaseBook, LeaseId,
-    LocalAdapterObservation, LocalNetworkSummary, PowerLeaseDecision, PowerLeasePolicy,
+    Config, ConnectivityEvidence, ConnectivityState, EndpointEvidence, EventStore, LeaseBook,
+    LeaseId, LocalAdapterObservation, LocalNetworkSummary, PowerLeaseDecision, PowerLeasePolicy,
     PowerLeasePolicyError, PowerSourceClass, ProcessIdentity, ReleaseReason, SessionEvent,
-    SessionEventKind, SessionReport, classify_local_observation,
+    SessionEventKind, SessionReport, classify_local_evidence,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
@@ -22,6 +22,7 @@ use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 
 mod probes;
+mod signals;
 
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
@@ -463,27 +464,41 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
     let mut snapshot = local_network_snapshot()?;
     if probe {
         let probes = probes::run_bounded_probes();
-        snapshot.external_probes_sent = probes.requests_attempted;
-        snapshot.internet_connectivity_tested = probes.requests_attempted;
-        if probes.requests_attempted {
-            let endpoints = [
-                EndpointEvidence {
+        snapshot.external_probes_attempted = probes.network_checks_attempted;
+        snapshot.internet_connectivity_tested = probes.network_checks_attempted;
+        let endpoints = [
+            probes
+                .microsoft_connect_test
+                .attempted
+                .then(|| EndpointEvidence {
                     category: "microsoft_ncsi".to_owned(),
                     reachable: probes.microsoft_connect_test.reachable,
                     user_configured_service: false,
-                },
-                EndpointEvidence {
+                }),
+            probes
+                .independent_https
+                .attempted
+                .then(|| EndpointEvidence {
                     category: "independent_https".to_owned(),
                     reachable: probes.independent_https.reachable,
                     user_configured_service: false,
-                },
-            ];
-            snapshot.connectivity_classification = Some(classify_local_observation(
-                &snapshot.summary,
-                &endpoints,
-                probes.captive_portal_suspected,
-            ));
-        }
+                }),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        snapshot.connectivity_classification = Some(classify_local_evidence(
+            &snapshot.summary,
+            &ConnectivityEvidence {
+                default_route_present: probes.default_route_present,
+                gateway_reachable: probes.gateway_reachable,
+                dns_resolves: probes.dns_resolved_for_both,
+                captive_portal_suspected: probes.captive_portal_suspected,
+                proxy_restricted: probes.proxy_restricted,
+                endpoints,
+                ..ConnectivityEvidence::default()
+            },
+        ));
         snapshot.probes = Some(probes);
     }
     if json {
@@ -521,8 +536,24 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
         println!("Adapter metadata is summarized without names or address values.");
         println!("A tunnel-type interface is only a hint; VPN state is not confirmed.");
         if let Some(probes) = &snapshot.probes {
-            println!("Two fixed one-shot probe checks were requested.");
-            println!("Requests attempted: {}", probes.requests_attempted);
+            println!("One-shot network diagnostics were requested.");
+            println!("Web requests attempted: {}", probes.web_requests_attempted);
+            println!(
+                "Microsoft NCSI name resolved: {}",
+                option_label(probes.microsoft_dns_resolved)
+            );
+            println!(
+                "Independent HTTPS name resolved: {}",
+                option_label(probes.independent_dns_resolved)
+            );
+            println!(
+                "Default route present: {}",
+                option_label(probes.default_route_present)
+            );
+            println!(
+                "Gateway reachability: {}",
+                gateway_label(probes.gateway_reachable)
+            );
             println!(
                 "Microsoft connectivity check: {}",
                 probe_label(probes.microsoft_connect_test.reachable)
@@ -535,12 +566,12 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
                 "Captive portal suspected: {}",
                 probes.captive_portal_suspected
             );
+            println!("Proxy authentication required: {}", probes.proxy_restricted);
             if let Some(classification) = snapshot.connectivity_classification {
-                println!("Preliminary connectivity assessment: {classification:?}");
-                println!("DNS resolution and gateway reachability were not tested.");
+                println!("Connectivity assessment: {classification:?}");
             }
         } else {
-            println!("No external probes were sent.");
+            println!("No external probes were attempted.");
         }
         println!("No network settings were changed.");
     }
@@ -650,7 +681,7 @@ struct LocalNetworkSnapshot {
     #[serde(flatten)]
     summary: LocalNetworkSummary,
     internet_connectivity_tested: bool,
-    external_probes_sent: bool,
+    external_probes_attempted: bool,
     network_settings_changed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     connectivity_classification: Option<ConnectivityState>,
@@ -731,5 +762,21 @@ fn probe_label(reachable: bool) -> &'static str {
         "reachable"
     } else {
         "not confirmed"
+    }
+}
+
+fn option_label(value: Option<bool>) -> &'static str {
+    match value {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unknown",
+    }
+}
+
+fn gateway_label(reachable: Option<bool>) -> &'static str {
+    match reachable {
+        Some(true) => "confirmed",
+        Some(false) => "unreachable",
+        None => "not confirmed (ICMP may be filtered)",
     }
 }

@@ -12,22 +12,34 @@ use windows_sys::Win32::Networking::WinHttp::{
     WinHttpSendRequest, WinHttpSetOption, WinHttpSetTimeouts,
 };
 
+use super::signals::{NetworkSignals, collect_network_signals};
+
 const STAGE_TIMEOUT_MS: i32 = 2_000;
 const MAX_RESPONSE_BODY_BYTES: u32 = 64;
 const MICROSOFT_EXPECTED_BODY: &[u8] = b"Microsoft Connect Test";
 
 #[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub(super) struct ProbeStatus {
+    pub attempted: bool,
     pub reachable: bool,
     pub redirect_observed: bool,
 }
 
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub(super) struct ProbeSummary {
-    pub requests_attempted: bool,
+    pub network_checks_attempted: bool,
+    pub web_requests_attempted: bool,
+    pub dns_queries_attempted: bool,
+    pub microsoft_dns_resolved: Option<bool>,
+    pub independent_dns_resolved: Option<bool>,
+    pub dns_resolved_for_both: Option<bool>,
+    pub default_route_present: Option<bool>,
+    pub gateway_echo_attempted: bool,
+    pub gateway_reachable: Option<bool>,
     pub microsoft_connect_test: ProbeStatus,
     pub independent_https: ProbeStatus,
     pub captive_portal_suspected: bool,
+    pub proxy_restricted: bool,
 }
 
 struct HttpHandle(*mut c_void);
@@ -59,9 +71,12 @@ struct ProbeOutcome {
     status: ProbeStatus,
     attempted: bool,
     portal_suspected: bool,
+    proxy_restricted: bool,
 }
 
 pub(super) fn run_bounded_probes() -> ProbeSummary {
+    let signals = collect_network_signals();
+    let mut summary = summary_from_signals(signals);
     let user_agent = wide("Agent Guardian connectivity check");
     let session = unsafe {
         WinHttpOpen(
@@ -73,7 +88,7 @@ pub(super) fn run_bounded_probes() -> ProbeSummary {
         )
     };
     let Some(session) = HttpHandle::new(session) else {
-        return ProbeSummary::default();
+        return summary;
     };
     let disabled_proxy_auth_schemes = WINHTTP_PROXY_DISABLE_SCHEME_BASIC
         | WINHTTP_PROXY_DISABLE_SCHEME_DIGEST
@@ -89,7 +104,7 @@ pub(super) fn run_bounded_probes() -> ProbeSummary {
         )
     } == 0
     {
-        return ProbeSummary::default();
+        return summary;
     }
     if unsafe {
         WinHttpSetTimeouts(
@@ -101,7 +116,7 @@ pub(super) fn run_bounded_probes() -> ProbeSummary {
         )
     } == 0
     {
-        return ProbeSummary::default();
+        return summary;
     }
 
     let microsoft = run_probe(
@@ -124,11 +139,32 @@ pub(super) fn run_bounded_probes() -> ProbeSummary {
             expected_body: None,
         },
     );
+    summary.web_requests_attempted = microsoft.attempted || independent.attempted;
+    summary.network_checks_attempted |= summary.web_requests_attempted;
+    summary.microsoft_connect_test = ProbeStatus {
+        attempted: microsoft.attempted,
+        ..microsoft.status
+    };
+    summary.independent_https = ProbeStatus {
+        attempted: independent.attempted,
+        ..independent.status
+    };
+    summary.captive_portal_suspected = microsoft.portal_suspected || independent.portal_suspected;
+    summary.proxy_restricted = microsoft.proxy_restricted || independent.proxy_restricted;
+    summary
+}
+
+fn summary_from_signals(signals: NetworkSignals) -> ProbeSummary {
     ProbeSummary {
-        requests_attempted: microsoft.attempted || independent.attempted,
-        microsoft_connect_test: microsoft.status,
-        independent_https: independent.status,
-        captive_portal_suspected: microsoft.portal_suspected || independent.portal_suspected,
+        network_checks_attempted: signals.dns_queries_attempted || signals.gateway_echo_attempted,
+        dns_queries_attempted: signals.dns_queries_attempted,
+        microsoft_dns_resolved: signals.microsoft_dns_resolved,
+        independent_dns_resolved: signals.independent_dns_resolved,
+        dns_resolved_for_both: signals.dns_resolved_for_both,
+        default_route_present: signals.default_route_present,
+        gateway_echo_attempted: signals.gateway_echo_attempted,
+        gateway_reachable: signals.gateway_reachable,
+        ..ProbeSummary::default()
     }
 }
 
@@ -201,6 +237,7 @@ fn run_probe(session: *mut c_void, target: ProbeTarget) -> ProbeOutcome {
             status: ProbeStatus::default(),
             attempted: true,
             portal_suspected: false,
+            proxy_restricted: false,
         };
     }
     if unsafe { WinHttpReceiveResponse(request.0, std::ptr::null_mut()) } == 0 {
@@ -208,6 +245,7 @@ fn run_probe(session: *mut c_void, target: ProbeTarget) -> ProbeOutcome {
             status: ProbeStatus::default(),
             attempted: true,
             portal_suspected: false,
+            proxy_restricted: false,
         };
     }
 
@@ -229,18 +267,20 @@ fn run_probe(session: *mut c_void, target: ProbeTarget) -> ProbeOutcome {
             status: ProbeStatus::default(),
             attempted: true,
             portal_suspected: false,
+            proxy_restricted: false,
         };
     }
 
     let body_matches = target
         .expected_body
         .map(|expected| read_body_contains(request.0, expected));
-    let (status, portal_suspected) =
+    let (status, portal_suspected, proxy_restricted) =
         interpret_response(status_code, target.expected_status, body_matches);
     ProbeOutcome {
         status,
         attempted: true,
         portal_suspected,
+        proxy_restricted,
     }
 }
 
@@ -248,17 +288,20 @@ fn interpret_response(
     status_code: u32,
     expected_status: u32,
     body_matches: Option<bool>,
-) -> (ProbeStatus, bool) {
+) -> (ProbeStatus, bool, bool) {
     let redirect_observed = (300..400).contains(&status_code);
     let body_mismatch = body_matches == Some(false);
     let reachable = status_code == expected_status && !body_mismatch;
     let portal_suspected = redirect_observed || (status_code == expected_status && body_mismatch);
+    let proxy_restricted = status_code == 407;
     (
         ProbeStatus {
+            attempted: false,
             reachable,
             redirect_observed,
         },
         portal_suspected,
+        proxy_restricted,
     )
 }
 
@@ -292,7 +335,12 @@ mod tests {
     #[test]
     fn summary_defaults_to_no_probes_or_connectivity_claims() {
         let summary = ProbeSummary::default();
-        assert!(!summary.requests_attempted);
+        assert!(!summary.network_checks_attempted);
+        assert!(!summary.web_requests_attempted);
+        assert!(!summary.dns_queries_attempted);
+        assert_eq!(summary.dns_resolved_for_both, None);
+        assert_eq!(summary.default_route_present, None);
+        assert_eq!(summary.gateway_reachable, None);
         assert!(!summary.microsoft_connect_test.reachable);
         assert!(!summary.independent_https.reachable);
         assert!(!summary.captive_portal_suspected);
@@ -316,23 +364,33 @@ mod tests {
 
     #[test]
     fn response_interpretation_distinguishes_reachability_redirects_and_failures() {
-        let (matched, matched_portal) = interpret_response(200, 200, Some(true));
+        let (matched, matched_portal, matched_proxy) = interpret_response(200, 200, Some(true));
         assert!(matched.reachable);
         assert!(!matched.redirect_observed);
         assert!(!matched_portal);
+        assert!(!matched_proxy);
 
-        let (mismatch, mismatch_portal) = interpret_response(200, 200, Some(false));
+        let (mismatch, mismatch_portal, mismatch_proxy) = interpret_response(200, 200, Some(false));
         assert!(!mismatch.reachable);
         assert!(mismatch_portal);
+        assert!(!mismatch_proxy);
 
-        let (redirect, redirect_portal) = interpret_response(302, 200, None);
+        let (redirect, redirect_portal, redirect_proxy) = interpret_response(302, 200, None);
         assert!(!redirect.reachable);
         assert!(redirect.redirect_observed);
         assert!(redirect_portal);
+        assert!(!redirect_proxy);
 
-        let (unavailable, unavailable_portal) = interpret_response(503, 200, None);
+        let (unavailable, unavailable_portal, unavailable_proxy) =
+            interpret_response(503, 200, None);
         assert!(!unavailable.reachable);
         assert!(!unavailable.redirect_observed);
         assert!(!unavailable_portal);
+        assert!(!unavailable_proxy);
+
+        let (proxy, proxy_portal, proxy_restricted) = interpret_response(407, 200, None);
+        assert!(!proxy.reachable);
+        assert!(!proxy_portal);
+        assert!(proxy_restricted);
     }
 }

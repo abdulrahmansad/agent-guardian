@@ -117,7 +117,11 @@ pub fn classify_connectivity(evidence: &ConnectivityEvidence) -> ConnectivitySta
         return ConnectivityState::AdapterFailure;
     }
     if evidence.default_route_present == Some(false) {
-        return ConnectivityState::WifiConnectedNoRoute;
+        return match evidence.wifi_connected {
+            Some(true) => ConnectivityState::WifiConnectedNoRoute,
+            Some(false) => ConnectivityState::WifiDisconnected,
+            None => ConnectivityState::UnknownFailure,
+        };
     }
 
     if evidence.gateway_reachable == Some(false) {
@@ -152,7 +156,10 @@ pub fn classify_connectivity(evidence: &ConnectivityEvidence) -> ConnectivitySta
         if evidence.dns_resolves == Some(false) {
             return ConnectivityState::DnsFailure;
         }
-        if evidence.dns_resolves != Some(true) {
+        if evidence.dns_resolves != Some(true)
+            || evidence.default_route_present != Some(true)
+            || evidence.gateway_reachable != Some(true)
+        {
             return ConnectivityState::Suspect;
         }
         if service_failed {
@@ -185,6 +192,21 @@ pub fn classify_local_observation(
     endpoints: &[EndpointEvidence],
     captive_portal_suspected: bool,
 ) -> ConnectivityState {
+    classify_local_evidence(
+        summary,
+        &ConnectivityEvidence {
+            captive_portal_suspected,
+            endpoints: endpoints.to_vec(),
+            ..ConnectivityEvidence::default()
+        },
+    )
+}
+
+/// Add privacy-limited local Wi-Fi state to independently collected diagnostics.
+pub fn classify_local_evidence(
+    summary: &LocalNetworkSummary,
+    evidence: &ConnectivityEvidence,
+) -> ConnectivityState {
     let wifi_connected = if summary.wifi_adapter_operational {
         Some(true)
     } else if summary.wifi_adapters_detected && summary.operational_adapter_count == 0 {
@@ -192,20 +214,9 @@ pub fn classify_local_observation(
     } else {
         None
     };
-    let default_route_present = if summary.operational_gateway_address_reported {
-        Some(true)
-    } else if summary.operational_adapter_count == 0 {
-        Some(false)
-    } else {
-        None
-    };
-    classify_connectivity(&ConnectivityEvidence {
-        wifi_connected,
-        default_route_present,
-        captive_portal_suspected,
-        endpoints: endpoints.to_vec(),
-        ..ConnectivityEvidence::default()
-    })
+    let mut evidence = evidence.clone();
+    evidence.wifi_connected = wifi_connected;
+    classify_connectivity(&evidence)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -479,6 +490,69 @@ mod tests {
         assert_eq!(
             classify_local_observation(&summary, &two_independent(true), false),
             ConnectivityState::Suspect
+        );
+    }
+
+    #[test]
+    fn healthy_requires_dns_route_gateway_and_two_independent_endpoints() {
+        let evidence = ConnectivityEvidence {
+            wifi_connected: Some(true),
+            default_route_present: Some(true),
+            gateway_reachable: Some(true),
+            dns_resolves: Some(true),
+            endpoints: two_independent(true),
+            ..ConnectivityEvidence::default()
+        };
+        assert_eq!(classify_connectivity(&evidence), ConnectivityState::Healthy);
+
+        for missing in [
+            ConnectivityEvidence {
+                gateway_reachable: None,
+                ..evidence.clone()
+            },
+            ConnectivityEvidence {
+                default_route_present: None,
+                ..evidence.clone()
+            },
+            ConnectivityEvidence {
+                dns_resolves: None,
+                ..evidence.clone()
+            },
+        ] {
+            assert_eq!(classify_connectivity(&missing), ConnectivityState::Suspect);
+        }
+    }
+
+    #[test]
+    fn missing_route_is_not_mislabeled_as_a_wifi_fault_without_wifi_evidence() {
+        let evidence = ConnectivityEvidence {
+            default_route_present: Some(false),
+            ..ConnectivityEvidence::default()
+        };
+        assert_eq!(
+            classify_connectivity(&evidence),
+            ConnectivityState::UnknownFailure
+        );
+    }
+
+    #[test]
+    fn proxy_restriction_takes_precedence_over_remote_endpoint_failures() {
+        let evidence = ConnectivityEvidence {
+            wifi_connected: Some(true),
+            default_route_present: Some(true),
+            gateway_reachable: Some(true),
+            dns_resolves: Some(true),
+            proxy_restricted: true,
+            endpoints: two_independent(false),
+            ..ConnectivityEvidence::default()
+        };
+        assert_eq!(
+            classify_connectivity(&evidence),
+            ConnectivityState::ProxyRestricted
+        );
+        assert_eq!(
+            decide_recovery(ConnectivityState::ProxyRestricted, authorized()),
+            RecoveryAction::NotifyUser
         );
     }
 
