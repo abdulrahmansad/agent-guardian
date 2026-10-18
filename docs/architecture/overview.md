@@ -20,13 +20,15 @@ Start with a foreground, per-user Windows process. It may hold a narrowly scoped
 
 The runtime should bind a lease to an opened process handle and process creation identity, not trust a PID by itself. Leases are volatile initially. When the process exits, the lease expires, or the runtime exits, the request is cleared and the OS closes its handle. No lease is restored after a restart in the initial design.
 
-Network monitoring should begin as observation and classification. Detection produces evidence; a separate pure recovery policy decides whether an operation is safe. Initial releases should not restart adapters automatically. Profile reconnection or adapter recovery needs Windows-specific validation, bounded retries, an explicit authorization model, and controlled testing.
+Network monitoring begins as observation and classification. Detection produces evidence; a separate pure recovery policy decides whether an operation is safe. The explicit `guardian network --reconnect-saved-wifi` command can submit one request through the first existing Windows profile in preference order. It requires a confirmed Wi-Fi disconnect, confirmed absence of an active default route, and exactly one disconnected wireless interface, then waits up to 20 seconds for association. The command does not read key material, expose the profile name, confirm Internet access, or restart an adapter. The foreground monitor cannot invoke recovery. Live API and hardware behavior remain unverified.
 
 The default `guardian network` command makes one explicit, read-only `GetAdaptersAddresses` call. It summarizes Wi-Fi adapter presence/operational state, gateway-address presence, and whether a tunnel-type interface is reported. The tunnel signal is only a hint and does not confirm VPN state. The command omits adapter names, SSIDs, and address values, and sends no probes by default. `guardian monitor` is an opt-in foreground listener, bounded to 60 minutes, that registers `NotifyIpInterfaceChange` and `NotifyRouteChange2` notifications and refreshes the local aggregate snapshot on change. A local snapshot fallback runs every five minutes by default. The monitor sends no DNS/HTTP/ICMP probes, makes no network or power changes, and does not write network events to the journal; its output cannot establish internet health.
 
 The runtime installer is a separate, explicit per-user operation. It copies only the currently running executable to `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe` after validating a caller-supplied SHA-256 and rechecking the staged copy. It does not elevate, modify PATH or startup, or remove configuration/logs. The hash does not authenticate a publisher; public release artifacts and trusted checksum distribution are still pending.
 
 The explicit `guardian network --probe` option resolves two fixed DNS names through the Windows DNS namespace, inspects active default-route metadata, may send one bounded gateway ICMP echo per address family, and makes two fixed one-shot web requests through Windows automatic proxy settings: the Microsoft NCSI HTTP probe and a Cloudflare HTTPS check. WinHTTP redirects, server/proxy authentication, and cookies are disabled, and WinHTTP is configured with 2-second per-stage timeouts. An explicit HTTP 407 response is classified as `PROXY_RESTRICTED`; other proxy transport failures remain ambiguous. TCP retries or proxy discovery can extend total time. Probe outcomes are displayed only and are not journaled. The deterministic classifier requires positive DNS, active route, gateway response, and both independent web checks before reporting `HEALTHY`. The monitor and probes do not confirm VPN state or a user-configured remote service. The current power lease checks source transitions every ten seconds while waiting for its target process; a battery opt-in caps the lease at five minutes from the observed transition, subject to the original TTL.
+
+The saved Wi-Fi recovery implementation uses the Native Wi-Fi API. It reads the preferred profile list, uses only the first profile name in memory, submits a single `WlanConnect` request, and checks interface association state for up to 20 seconds. It does not call `WlanGetProfile`, export credentials, or use shell commands. See the [recovery command and test limits](../development/network-recovery.md).
 
 ## Decisions
 
@@ -49,7 +51,14 @@ The explicit `guardian network --probe` option resolves two fixed DNS names thro
 - **Status:** Accepted.
 - **Context:** External service outages, DNS problems, VPN changes, captive portals, and local Wi-Fi failures can look similar when relying on one probe.
 - **Decision:** Collect bounded evidence, classify conservatively, and pass a typed state to a side-effect-free recovery decision function. Unknown or remote-only failures never justify adapter reset.
-- **Consequences:** Initial network support can be useful and testable without touching a live adapter. Real recovery is a later gated feature.
+- **Consequences:** Local observation and policy are testable without touching a live adapter. The separate saved-profile reconnect is opt-in and is covered by deterministic mock-backend tests; live recovery remains a gated hardware test.
+
+### ADR-004: Keep saved-profile reconnection explicitly one-shot
+
+- **Status:** Accepted.
+- **Context:** Automatically reconnecting can override user intent or disturb another healthy route. A profile name is also local network metadata that should not enter logs or output.
+- **Decision:** Provide a separate `--reconnect-saved-wifi` command option, refuse unless local evidence confirms a disconnected Wi-Fi interface and no active route, require exactly one disconnected Native Wi-Fi interface, and try its first Windows-preferred saved profile once. Keep the profile name only in memory and do not automate this action from the monitor.
+- **Consequences:** This creates a testable native connection request without broad network mutation. It does not establish Internet access, and controlled hardware validation is still required before making reliability claims or adding automatic recovery.
 
 ## Power behavior evidence
 

@@ -9,7 +9,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 3 | Normal power behavior returns after release | NOT TESTED | Stop/expiry, then wait through configured sleep timeout |
 | 4 | Multiple concurrent sessions work | PASS | Deterministic `LeaseBook` test; multiple live Windows power-request handles are not tested |
 | 5 | Stale/recycled PIDs do not hold protection | PASS | Deterministic process creation identity test; Windows PID reuse is not forced on this device |
-| 6 | Brief Wi-Fi disconnect reconnects safely where supported | NOT TESTED | Simulation first; controlled test adapter only with approval |
+| 6 | Brief Wi-Fi disconnect reconnects safely where supported | NOT TESTED | Deterministic mock-backend tests cover authorization, route/interface/profile gates, one request, and bounded confirmation; a controlled test adapter is still required |
 | 7 | Naturally restored Wi-Fi does not trigger unnecessary reset | NOT TESTED | Recovery planner simulation and controlled observation |
 | 8 | Upstream outage does not trigger destructive recovery | PASS | Core simulation classifies independent probe failures as upstream and returns `NotifyUser`; no recovery executor exists |
 | 9 | DNS-only failure classified conservatively | PASS | Core DNS-only classifier test returns `DnsFailure` and `NotifyUser` |
@@ -33,6 +33,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 27 | Foreground local monitor starts, expires within its configured bound, and unregisters Windows notifications | PASS | Windows 11 x64 one-minute monitor smoke check emitted the initial and stopped JSON records; no local state change occurred |
 | 28 | Windows interface and route notifications refresh the privacy-limited snapshot | NOT TESTED | Requires a controlled test adapter/network and an actual interface or route change; do not disrupt the active workstation |
 | 29 | Checksum-verified installer and scoped uninstaller preserve unrelated files | PASS | Windows tests used disposable paths with spaces and non-ASCII characters. They covered staged-file rehashing, checksum mismatch preserving the prior executable, upgrade, removal of only `guardian.exe`, and the same-path/hard-link identity guards. Actual removal behavior while the executable image is running, a real profile install, and a clean-user VM audit remain NOT TESTED |
+| 30 | Saved-profile reconnect requires explicit authorization and local Wi-Fi-only evidence | PASS | Mock-backend tests verify no request on missing authorization, active/unknown route, healthy Wi-Fi, multiple interfaces, connected interface, missing profile, route appearance during preparation, or Wi-Fi reconnecting during preparation. The native request and real Wi-Fi association remain NOT TESTED |
 
 ## Automated test plan
 

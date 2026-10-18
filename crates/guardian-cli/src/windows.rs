@@ -24,6 +24,7 @@ use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 mod install;
 mod monitor;
 mod probes;
+mod recovery;
 mod signals;
 
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
@@ -465,13 +466,34 @@ pub fn doctor(json: bool) -> Result<(), String> {
             Err(error) => println!("Unavailable: {error}"),
         }
         println!("Locked-session behavior: not verified on this device.");
-        println!("Network recovery: not implemented; no adapter changes are made.");
+        println!("Automatic network recovery: disabled.");
+        println!("A one-shot saved-profile reconnect requires an explicit network command option.");
     }
     Ok(())
 }
 
-pub fn network(json: bool, probe: bool) -> Result<(), String> {
+pub fn network(json: bool, probe: bool, reconnect_saved_wifi: bool) -> Result<(), String> {
     let mut snapshot = local_network_snapshot()?;
+    if reconnect_saved_wifi {
+        let outcome = recovery::attempt(&snapshot.summary, true);
+        let network_change_requested = matches!(
+            outcome.disposition,
+            "connected" | "connection_not_confirmed" | "connection_confirmation_failed"
+        );
+        match local_network_snapshot() {
+            Ok(mut refreshed) => {
+                refreshed.network_change_requested = network_change_requested;
+                refreshed.post_recovery_snapshot_refreshed = Some(true);
+                refreshed.recovery = Some(outcome);
+                snapshot = refreshed;
+            }
+            Err(_) => {
+                snapshot.network_change_requested = network_change_requested;
+                snapshot.post_recovery_snapshot_refreshed = Some(false);
+                snapshot.recovery = Some(outcome);
+            }
+        }
+    }
     if probe {
         let probes = probes::run_bounded_probes();
         snapshot.external_probes_attempted = probes.network_checks_attempted;
@@ -545,6 +567,21 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
         println!();
         println!("Adapter metadata is summarized without names or address values.");
         println!("A tunnel-type interface is only a hint; VPN state is not confirmed.");
+        if let Some(recovery) = snapshot.recovery {
+            println!("Saved-profile reconnect result: {}", recovery.disposition);
+            println!(
+                "Connection confirmed: {}",
+                option_label(recovery.connection_confirmed)
+            );
+            if let Some(code) = recovery.windows_error {
+                println!("Windows error: {code}");
+            }
+            println!("Profile names and Wi-Fi credentials are not displayed or stored.");
+            println!(
+                "Post-reconnect snapshot refreshed: {}",
+                snapshot.post_recovery_snapshot_refreshed.unwrap_or(false)
+            );
+        }
         if let Some(probes) = &snapshot.probes {
             println!("One-shot network diagnostics were requested.");
             println!("Web requests attempted: {}", probes.web_requests_attempted);
@@ -583,7 +620,10 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
         } else {
             println!("No external probes were attempted.");
         }
-        println!("No network settings were changed.");
+        println!("No adapter or saved-profile configuration was changed.");
+        if snapshot.network_change_requested {
+            println!("A one-shot request may have changed the active Wi-Fi connection.");
+        }
     }
     Ok(())
 }
@@ -701,6 +741,11 @@ struct LocalNetworkSnapshot {
     connectivity_classification: Option<ConnectivityState>,
     #[serde(skip_serializing_if = "Option::is_none")]
     probes: Option<probes::ProbeSummary>,
+    network_change_requested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    post_recovery_snapshot_refreshed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery: Option<recovery::RecoveryReport>,
 }
 
 fn local_network_snapshot() -> Result<LocalNetworkSnapshot, String> {

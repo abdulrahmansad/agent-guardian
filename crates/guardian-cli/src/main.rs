@@ -45,11 +45,14 @@ enum Command {
     Status,
     /// Read-only environment and power diagnostics.
     Doctor,
-    /// Inspect network state without changing adapters.
+    /// Inspect network state and optionally request one saved-profile reconnect.
     Network {
         /// Run one bounded connectivity check using fixed DNS, route, gateway, and web evidence.
         #[arg(long)]
         probe: bool,
+        /// Explicitly request one saved-profile reconnect if Wi-Fi is confirmed disconnected and no default route exists.
+        #[arg(long, conflicts_with = "probe")]
+        reconnect_saved_wifi: bool,
     },
     /// Monitor local IP-interface and route changes in the foreground.
     Monitor {
@@ -117,8 +120,8 @@ fn main() -> ExitCode {
         }
         Command::Status => platform_diagnostic("requests"),
         Command::Doctor => platform_doctor(args.json),
-        Command::Network { probe } => {
-            platform_network(args.json, probe)
+        Command::Network { probe, reconnect_saved_wifi } => {
+            platform_network(args.json, probe, reconnect_saved_wifi)
         }
         Command::Monitor { duration_minutes, interval_seconds } => {
             let duration_minutes = duration_minutes.unwrap_or(60);
@@ -249,14 +252,14 @@ fn platform_doctor(json: bool) -> Result<(), String> {
     }
 }
 
-fn platform_network(json: bool, probe: bool) -> Result<(), String> {
+fn platform_network(json: bool, probe: bool, reconnect_saved_wifi: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
-        windows::network(json, probe)
+        windows::network(json, probe, reconnect_saved_wifi)
     }
     #[cfg(not(windows))]
     {
-        let _ = (json, probe);
+        let _ = (json, probe, reconnect_saved_wifi);
         Err("network diagnostics are available only on Windows".into())
     }
 }
@@ -354,11 +357,33 @@ mod tests {
         let local_only = Args::try_parse_from(["guardian", "network"]).unwrap();
         assert!(matches!(
             local_only.command,
-            Command::Network { probe: false }
+            Command::Network {
+                probe: false,
+                reconnect_saved_wifi: false
+            }
         ));
 
         let opt_in = Args::try_parse_from(["guardian", "network", "--probe"]).unwrap();
-        assert!(matches!(opt_in.command, Command::Network { probe: true }));
+        assert!(matches!(
+            opt_in.command,
+            Command::Network {
+                probe: true,
+                reconnect_saved_wifi: false
+            }
+        ));
+        let reconnect =
+            Args::try_parse_from(["guardian", "network", "--reconnect-saved-wifi"]).unwrap();
+        assert!(matches!(
+            reconnect.command,
+            Command::Network {
+                probe: false,
+                reconnect_saved_wifi: true
+            }
+        ));
+        assert!(
+            Args::try_parse_from(["guardian", "network", "--probe", "--reconnect-saved-wifi"])
+                .is_err()
+        );
     }
 
     #[test]
