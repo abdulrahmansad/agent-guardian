@@ -11,7 +11,7 @@ use guardian_core::{
     Config, ConnectivityEvidence, ConnectivityState, EndpointEvidence, EventStore, LeaseBook,
     LeaseId, LocalAdapterObservation, LocalNetworkSummary, PowerLeaseDecision, PowerLeasePolicy,
     PowerLeasePolicyError, PowerSourceClass, ProcessIdentity, ReleaseReason, SessionEvent,
-    SessionEventKind, SessionReport, classify_local_evidence,
+    SessionEventKind, SessionReport, WifiReconnectResult, classify_local_evidence,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
@@ -368,13 +368,21 @@ fn unix_time_ms() -> u64 {
 }
 
 fn event_store(config: &Config) -> Result<EventStore, String> {
+    event_store_at(config, "events.jsonl")
+}
+
+fn network_event_store(config: &Config) -> Result<EventStore, String> {
+    event_store_at(config, "network-events.jsonl")
+}
+
+fn event_store_at(config: &Config, filename: &str) -> Result<EventStore, String> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
         "LOCALAPPDATA is unavailable; cannot open the local event log".to_string()
     })?;
     Ok(EventStore::from_logging_config(
         PathBuf::from(local_app_data)
             .join("AgentGuardian")
-            .join("events.jsonl"),
+            .join(filename),
         &config.logging,
     ))
 }
@@ -472,10 +480,17 @@ pub fn doctor(json: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn network(json: bool, probe: bool, reconnect_saved_wifi: bool) -> Result<(), String> {
+pub fn network(
+    json: bool,
+    probe: bool,
+    reconnect_saved_wifi: bool,
+    config: Config,
+) -> Result<(), String> {
     let mut snapshot = local_network_snapshot()?;
     if reconnect_saved_wifi {
         let outcome = recovery::attempt(&snapshot.summary, true);
+        let recovery_event_logged =
+            record_recovery_event(network_event_store(&config), &outcome, unix_time_ms());
         let network_change_requested = matches!(
             outcome.disposition,
             "connected" | "connection_not_confirmed" | "connection_confirmation_failed"
@@ -483,12 +498,14 @@ pub fn network(json: bool, probe: bool, reconnect_saved_wifi: bool) -> Result<()
         match local_network_snapshot() {
             Ok(mut refreshed) => {
                 refreshed.network_change_requested = network_change_requested;
+                refreshed.recovery_event_logged = Some(recovery_event_logged);
                 refreshed.post_recovery_snapshot_refreshed = Some(true);
                 refreshed.recovery = Some(outcome);
                 snapshot = refreshed;
             }
             Err(_) => {
                 snapshot.network_change_requested = network_change_requested;
+                snapshot.recovery_event_logged = Some(recovery_event_logged);
                 snapshot.post_recovery_snapshot_refreshed = Some(false);
                 snapshot.recovery = Some(outcome);
             }
@@ -581,6 +598,10 @@ pub fn network(json: bool, probe: bool, reconnect_saved_wifi: bool) -> Result<()
                 "Post-reconnect snapshot refreshed: {}",
                 snapshot.post_recovery_snapshot_refreshed.unwrap_or(false)
             );
+            println!(
+                "Recovery outcome logged locally: {}",
+                snapshot.recovery_event_logged.unwrap_or(false)
+            );
         }
         if let Some(probes) = &snapshot.probes {
             println!("One-shot network diagnostics were requested.");
@@ -633,19 +654,20 @@ pub fn monitor(json: bool, duration_minutes: u32, interval_seconds: u32) -> Resu
 }
 
 pub fn logs(json: bool, config: Config) -> Result<(), String> {
-    let events = event_store(&config)?.read_events()?;
+    let events = read_all_events(&config)?;
     if json {
         println!(
             "{}",
             serde_json::to_string_pretty(&events).map_err(|error| error.to_string())?
         );
     } else if events.is_empty() {
-        println!("No Guardian session events are recorded.");
+        println!("No Guardian events are recorded.");
     } else {
         for event in &events {
             let message = match event.kind {
                 SessionEventKind::LeaseStarted => "Power lease started",
                 SessionEventKind::LeaseReleased(reason) => release_label(reason),
+                SessionEventKind::WifiReconnectOutcome(result) => wifi_reconnect_label(result),
             };
             println!(
                 "{}  {}  {}",
@@ -657,7 +679,7 @@ pub fn logs(json: bool, config: Config) -> Result<(), String> {
 }
 
 pub fn report(output: Option<PathBuf>, json: bool, config: Config) -> Result<(), String> {
-    let events = event_store(&config)?.read_events()?;
+    let events = read_all_events(&config)?;
     let latest_session = events
         .iter()
         .filter(|event| event.kind == SessionEventKind::LeaseStarted)
@@ -695,6 +717,60 @@ pub fn report(output: Option<PathBuf>, json: bool, config: Config) -> Result<(),
         }
     }
     Ok(())
+}
+
+fn read_all_events(config: &Config) -> Result<Vec<SessionEvent>, String> {
+    let mut events = event_store(config)?.read_events()?;
+    let network_store = network_event_store(config)?;
+    match std::fs::symlink_metadata(network_store.path()) {
+        Ok(_) => events.extend(network_store.read_events()?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(format!(
+                "could not inspect local network event log: {error}"
+            ));
+        }
+    }
+    events.sort_by_key(|event| event.occurred_at_unix_ms);
+    Ok(events)
+}
+
+fn recovery_event_result(report: &recovery::RecoveryReport) -> WifiReconnectResult {
+    if !report.action_attempted {
+        return WifiReconnectResult::NotAttempted;
+    }
+    match report.disposition {
+        "connected" => WifiReconnectResult::AssociationConfirmed,
+        "connection_not_confirmed" => WifiReconnectResult::AssociationNotConfirmed,
+        "connection_confirmation_failed" => WifiReconnectResult::ConfirmationFailed,
+        "connection_request_failed" => WifiReconnectResult::RequestFailed,
+        _ => WifiReconnectResult::ConfirmationFailed,
+    }
+}
+
+fn record_recovery_event(
+    store: Result<EventStore, String>,
+    report: &recovery::RecoveryReport,
+    occurred_at_unix_ms: u64,
+) -> bool {
+    store
+        .and_then(|store| {
+            store.append(&SessionEvent::wifi_reconnect_outcome(
+                occurred_at_unix_ms,
+                recovery_event_result(report),
+            ))
+        })
+        .is_ok()
+}
+
+fn wifi_reconnect_label(result: WifiReconnectResult) -> &'static str {
+    match result {
+        WifiReconnectResult::NotAttempted => "Saved-profile reconnect not attempted",
+        WifiReconnectResult::RequestFailed => "Saved-profile reconnect request failed",
+        WifiReconnectResult::AssociationConfirmed => "Wi-Fi association confirmed",
+        WifiReconnectResult::AssociationNotConfirmed => "Wi-Fi association not confirmed",
+        WifiReconnectResult::ConfirmationFailed => "Wi-Fi association confirmation failed",
+    }
 }
 
 fn write_report(path: &PathBuf, report: &SessionReport) -> Result<(), String> {
@@ -742,6 +818,8 @@ struct LocalNetworkSnapshot {
     #[serde(skip_serializing_if = "Option::is_none")]
     probes: Option<probes::ProbeSummary>,
     network_change_requested: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    recovery_event_logged: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     post_recovery_snapshot_refreshed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -837,5 +915,89 @@ fn gateway_label(reachable: Option<bool>) -> &'static str {
         Some(true) => "confirmed",
         Some(false) => "unreachable",
         None => "not confirmed (ICMP may be filtered)",
+    }
+}
+
+#[cfg(test)]
+mod recovery_event_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn recovery_result_is_logged_redacted_and_survives_log_failure() {
+        let directory =
+            std::env::temp_dir().join(format!("guardian-network-event-test-{}", LeaseId::new_v4()));
+        fs::create_dir(&directory).unwrap();
+        let store = EventStore::new(directory.join("network-events.jsonl"), 4096, 14);
+        let outcome = recovery::RecoveryReport {
+            action_attempted: true,
+            connection_confirmed: Some(true),
+            disposition: "connected",
+            windows_error: None,
+        };
+
+        assert!(record_recovery_event(Ok(store.clone()), &outcome, 123));
+        let events = store.read_events().unwrap();
+        assert!(matches!(
+            events[0].kind,
+            SessionEventKind::WifiReconnectOutcome(WifiReconnectResult::AssociationConfirmed)
+        ));
+        let serialized = fs::read_to_string(store.path()).unwrap();
+        assert!(!serialized.to_ascii_lowercase().contains("ssid"));
+        assert!(!serialized.contains("profile"));
+
+        let blocker = directory.join("not-a-directory");
+        fs::write(&blocker, b"existing file").unwrap();
+        let unavailable_store = EventStore::new(blocker.join("network-events.jsonl"), 4096, 14);
+        assert!(!record_recovery_event(Ok(unavailable_store), &outcome, 456));
+        assert_eq!(outcome.disposition, "connected");
+
+        let _ = fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn recovery_dispositions_map_to_typed_outcomes() {
+        let cases = [
+            (
+                false,
+                "wifi_disconnect_not_confirmed",
+                None,
+                WifiReconnectResult::NotAttempted,
+            ),
+            (
+                true,
+                "connection_request_failed",
+                None,
+                WifiReconnectResult::RequestFailed,
+            ),
+            (
+                true,
+                "connected",
+                Some(true),
+                WifiReconnectResult::AssociationConfirmed,
+            ),
+            (
+                true,
+                "connection_not_confirmed",
+                Some(false),
+                WifiReconnectResult::AssociationNotConfirmed,
+            ),
+            (
+                true,
+                "connection_confirmation_failed",
+                None,
+                WifiReconnectResult::ConfirmationFailed,
+            ),
+        ];
+
+        for (action_attempted, disposition, connection_confirmed, expected) in cases {
+            let report = recovery::RecoveryReport {
+                action_attempted,
+                connection_confirmed,
+                disposition,
+                windows_error: None,
+            };
+            assert_eq!(recovery_event_result(&report), expected);
+        }
     }
 }

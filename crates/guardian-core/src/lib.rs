@@ -8,7 +8,7 @@ pub mod power;
 pub mod report;
 
 pub use config::{Config, ConfigError};
-pub use journal::{EventStore, ReleaseReason, SessionEvent, SessionEventKind};
+pub use journal::{EventStore, ReleaseReason, SessionEvent, SessionEventKind, WifiReconnectResult};
 pub use lease::{Lease, LeaseBook, LeaseError, LeaseId, ProcessIdentity};
 pub use network::{
     AdapterRestartBudget, ConnectivityEvidence, ConnectivityState, EndpointEvidence,

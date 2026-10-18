@@ -21,10 +21,21 @@ pub enum ReleaseReason {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WifiReconnectResult {
+    NotAttempted,
+    RequestFailed,
+    AssociationConfirmed,
+    AssociationNotConfirmed,
+    ConfirmationFailed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event", content = "reason", rename_all = "snake_case")]
 pub enum SessionEventKind {
     LeaseStarted,
     LeaseReleased(ReleaseReason),
+    WifiReconnectOutcome(WifiReconnectResult),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,9 +69,19 @@ impl SessionEvent {
             kind: SessionEventKind::LeaseReleased(reason),
         }
     }
+
+    pub fn wifi_reconnect_outcome(occurred_at_unix_ms: u64, result: WifiReconnectResult) -> Self {
+        Self {
+            schema_version: EVENT_SCHEMA_VERSION,
+            // Network outcomes are standalone records, not members of a power lease session.
+            session_id: Uuid::new_v4(),
+            occurred_at_unix_ms,
+            kind: SessionEventKind::WifiReconnectOutcome(result),
+        }
+    }
 }
 
-/// Bounded JSONL event storage. Event records contain only typed lease events and timestamps.
+/// Bounded JSONL event storage for typed lease lifecycle and Wi-Fi reconnect result events.
 #[derive(Debug, Clone)]
 pub struct EventStore {
     path: PathBuf,
@@ -300,11 +321,34 @@ mod tests {
     }
 
     #[test]
-    fn event_store_round_trips_only_typed_session_events() {
+    fn event_store_round_trips_typed_power_and_privacy_limited_network_events() {
         let store = store();
+        let network_store = EventStore::new(
+            store.path().parent().unwrap().join("network-events.jsonl"),
+            256,
+            14,
+        );
         let session = Uuid::new_v4();
         store
             .append(&SessionEvent::lease_started(session, 100))
+            .unwrap();
+        network_store
+            .append(&SessionEvent::wifi_reconnect_outcome(
+                50,
+                WifiReconnectResult::NotAttempted,
+            ))
+            .unwrap();
+        network_store
+            .append(&SessionEvent::wifi_reconnect_outcome(
+                150,
+                WifiReconnectResult::AssociationConfirmed,
+            ))
+            .unwrap();
+        network_store
+            .append(&SessionEvent::wifi_reconnect_outcome(
+                250,
+                WifiReconnectResult::RequestFailed,
+            ))
             .unwrap();
         store
             .append(&SessionEvent::lease_released(
@@ -315,12 +359,28 @@ mod tests {
             .unwrap();
         let stored_text = fs::read_to_string(store.path()).unwrap();
         assert!(!stored_text.contains("process_id"));
-        assert!(!stored_text.contains("ssid"));
-        let events = store.read_events().unwrap();
+        assert!(!stored_text.contains("wifi_reconnect_outcome"));
+        let network_text = fs::read_to_string(network_store.path()).unwrap();
+        assert!(!network_text.to_ascii_lowercase().contains("ssid"));
+        assert!(!network_text.contains("home-wifi"));
+        assert!(!network_text.contains("192.168.1.42"));
+        let mut events = store.read_events().unwrap();
+        events.extend(network_store.read_events().unwrap());
+        events.sort_by_key(|event| event.occurred_at_unix_ms);
         let report = SessionReport::from_events(&events, session, 250).unwrap();
         assert_eq!(report.started_at_unix_ms, 100);
         assert_eq!(report.ended_at_unix_ms, Some(200));
         assert_eq!(report.protected_duration_ms, Some(100));
+        assert_eq!(report.incidents.len(), 3);
+        assert_eq!(
+            report.incidents[1].kind,
+            crate::report::IncidentKind::WifiAssociationConfirmed
+        );
+        assert!(
+            report.incidents[1]
+                .summary
+                .contains("Internet access was not tested")
+        );
         assert!(report.validate());
         cleanup(&store);
     }

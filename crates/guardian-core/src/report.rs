@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
 
-use crate::journal::{ReleaseReason, SessionEvent, SessionEventKind};
+use crate::journal::{ReleaseReason, SessionEvent, SessionEventKind, WifiReconnectResult};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -15,6 +15,11 @@ pub enum IncidentKind {
     PowerLeaseStarted,
     PowerLeaseReleased,
     DiagnosticError,
+    WifiReconnectNotAttempted,
+    WifiReconnectRequestFailed,
+    WifiAssociationConfirmed,
+    WifiAssociationNotConfirmed,
+    WifiAssociationConfirmationFailed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,7 +65,7 @@ impl SessionReport {
                 SessionEventKind::LeaseReleased(reason) => {
                     Some((event.occurred_at_unix_ms, reason))
                 }
-                SessionEventKind::LeaseStarted => None,
+                SessionEventKind::LeaseStarted | SessionEventKind::WifiReconnectOutcome(_) => None,
             })
             .min_by_key(|(occurred_at_unix_ms, _)| *occurred_at_unix_ms);
         let ended_at_unix_ms = release.map(|(occurred_at_unix_ms, _)| occurred_at_unix_ms);
@@ -83,6 +88,22 @@ impl SessionReport {
         }
 
         let report_end = ended_at_unix_ms.unwrap_or(generated_at_unix_ms);
+        for event in events.iter().filter(|event| {
+            event.occurred_at_unix_ms >= started_at_unix_ms
+                && event.occurred_at_unix_ms <= report_end
+        }) {
+            if let SessionEventKind::WifiReconnectOutcome(result) = event.kind {
+                let (kind, summary) = wifi_reconnect_incident(result);
+                incidents.push(Incident {
+                    occurred_at_unix_ms: event.occurred_at_unix_ms,
+                    kind,
+                    summary: summary.into(),
+                    classification: None,
+                });
+            }
+        }
+        incidents.sort_by_key(|incident| incident.occurred_at_unix_ms);
+
         let mut ordered_events = events.to_vec();
         ordered_events.sort_by_key(|event| event.occurred_at_unix_ms);
         let mut active_sessions = HashSet::new();
@@ -98,6 +119,7 @@ impl SessionReport {
                 SessionEventKind::LeaseReleased(_) => {
                     active_sessions.remove(&event.session_id);
                 }
+                SessionEventKind::WifiReconnectOutcome(_) => {}
             }
             if event.occurred_at_unix_ms >= started_at_unix_ms
                 && active_sessions.contains(&session_id)
@@ -144,6 +166,31 @@ impl SessionReport {
                         .ended_at_unix_ms
                         .is_none_or(|ended_at| incident.occurred_at_unix_ms <= ended_at)
             })
+    }
+}
+
+fn wifi_reconnect_incident(result: WifiReconnectResult) -> (IncidentKind, &'static str) {
+    match result {
+        WifiReconnectResult::NotAttempted => (
+            IncidentKind::WifiReconnectNotAttempted,
+            "Saved-profile reconnect was not attempted; prerequisites were not satisfied",
+        ),
+        WifiReconnectResult::RequestFailed => (
+            IncidentKind::WifiReconnectRequestFailed,
+            "Saved-profile reconnect request failed",
+        ),
+        WifiReconnectResult::AssociationConfirmed => (
+            IncidentKind::WifiAssociationConfirmed,
+            "Wi-Fi association confirmed; Internet access was not tested",
+        ),
+        WifiReconnectResult::AssociationNotConfirmed => (
+            IncidentKind::WifiAssociationNotConfirmed,
+            "Wi-Fi association was not confirmed within the check window",
+        ),
+        WifiReconnectResult::ConfirmationFailed => (
+            IncidentKind::WifiAssociationConfirmationFailed,
+            "Wi-Fi association status could not be checked after the request",
+        ),
     }
 }
 

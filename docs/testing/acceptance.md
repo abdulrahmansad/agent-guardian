@@ -23,7 +23,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 17 | Install/uninstall leave no unauthorized persistent changes | NOT TESTED | Clean-user VM install/uninstall audit |
 | 18 | Reboot does not restore invalid leases | NOT TESTED | Restart test; expected no persisted lease restoration initially |
 | 19 | Service permissions resist unauthorized clients | NOT TESTED | No service/IPC planned in first slice; gate before adding it |
-| 20 | Reports reflect actual events | PASS | JSONL fixture CLI smoke test reconciled start/release timestamps and duration; a live power-lease event chain remains untested |
+| 20 | Reports reflect actual events | PASS | JSONL fixture CLI smoke test reconciled start/release timestamps and duration; typed reconnect outcomes are included by timestamp interval. A live power-lease event chain remains untested |
 | 21 | Default local snapshot omits identifiers and changes no settings | PASS | Windows 11 x64 CLI smoke test showed counts/booleans only; a pure core test covers adapter summary aggregation; the default command does not call the probe executor |
 | 22 | Configured journal size and retention are enforced | PASS | Disposable-directory integration test verifies 1 MiB rotation and removal of a file older than the configured one-day retention |
 | 23 | External connectivity probes require an explicit flag | PASS | CLI parser test verifies `guardian network` defaults to local-only and `--probe` is required; probes were not sent during tests |
@@ -34,6 +34,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 28 | Windows interface and route notifications refresh the privacy-limited snapshot | NOT TESTED | Requires a controlled test adapter/network and an actual interface or route change; do not disrupt the active workstation |
 | 29 | Checksum-verified installer and scoped uninstaller preserve unrelated files | PASS | Windows tests used disposable paths with spaces and non-ASCII characters. They covered staged-file rehashing, checksum mismatch preserving the prior executable, upgrade, removal of only `guardian.exe`, and the same-path/hard-link identity guards. Actual removal behavior while the executable image is running, a real profile install, and a clean-user VM audit remain NOT TESTED |
 | 30 | Saved-profile reconnect requires explicit authorization and local Wi-Fi-only evidence | PASS | Mock-backend tests verify no request on missing authorization, active/unknown route, healthy Wi-Fi, multiple interfaces, connected interface, missing profile, route appearance during preparation, or Wi-Fi reconnecting during preparation. The native request and real Wi-Fi association remain NOT TESTED |
+| 31 | Reconnect outcomes are bounded, redacted, and visible in logs/reports | PASS | Core and Windows-target tests verify typed outcome storage, omission of profile/SSID/address data, session-interval report inclusion, and preservation of the command result when logging fails. Native Wi-Fi behavior remains NOT TESTED |
 
 ## Automated test plan
 

@@ -53,6 +53,9 @@ enum Command {
         /// Explicitly request one saved-profile reconnect if Wi-Fi is confirmed disconnected and no default route exists.
         #[arg(long, conflicts_with = "probe")]
         reconnect_saved_wifi: bool,
+        /// Read journal limits from this TOML file instead of the per-user default.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     /// Monitor local IP-interface and route changes in the foreground.
     Monitor {
@@ -120,8 +123,16 @@ fn main() -> ExitCode {
         }
         Command::Status => platform_diagnostic("requests"),
         Command::Doctor => platform_doctor(args.json),
-        Command::Network { probe, reconnect_saved_wifi } => {
-            platform_network(args.json, probe, reconnect_saved_wifi)
+        Command::Network { probe, reconnect_saved_wifi, config: config_path } => {
+            let config = if config_path.is_some() || reconnect_saved_wifi {
+                match load_config(config_path.as_deref()) {
+                    Ok(config) => config,
+                    Err(error) => return report_error(error),
+                }
+            } else {
+                Config::default()
+            };
+            platform_network(args.json, probe, reconnect_saved_wifi, config)
         }
         Command::Monitor { duration_minutes, interval_seconds } => {
             let duration_minutes = duration_minutes.unwrap_or(60);
@@ -252,14 +263,19 @@ fn platform_doctor(json: bool) -> Result<(), String> {
     }
 }
 
-fn platform_network(json: bool, probe: bool, reconnect_saved_wifi: bool) -> Result<(), String> {
+fn platform_network(
+    json: bool,
+    probe: bool,
+    reconnect_saved_wifi: bool,
+    config: Config,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
-        windows::network(json, probe, reconnect_saved_wifi)
+        windows::network(json, probe, reconnect_saved_wifi, config)
     }
     #[cfg(not(windows))]
     {
-        let _ = (json, probe, reconnect_saved_wifi);
+        let _ = (json, probe, reconnect_saved_wifi, config);
         Err("network diagnostics are available only on Windows".into())
     }
 }
@@ -359,7 +375,8 @@ mod tests {
             local_only.command,
             Command::Network {
                 probe: false,
-                reconnect_saved_wifi: false
+                reconnect_saved_wifi: false,
+                ..
             }
         ));
 
@@ -368,7 +385,8 @@ mod tests {
             opt_in.command,
             Command::Network {
                 probe: true,
-                reconnect_saved_wifi: false
+                reconnect_saved_wifi: false,
+                ..
             }
         ));
         let reconnect =
@@ -377,8 +395,25 @@ mod tests {
             reconnect.command,
             Command::Network {
                 probe: false,
-                reconnect_saved_wifi: true
+                reconnect_saved_wifi: true,
+                ..
             }
+        ));
+        let reconnect_with_config = Args::try_parse_from([
+            "guardian",
+            "network",
+            "--reconnect-saved-wifi",
+            "--config",
+            "guardian.toml",
+        ])
+        .unwrap();
+        assert!(matches!(
+            reconnect_with_config.command,
+            Command::Network {
+                reconnect_saved_wifi: true,
+                config: Some(path),
+                ..
+            } if path == Path::new("guardian.toml")
         ));
         assert!(
             Args::try_parse_from(["guardian", "network", "--probe", "--reconnect-saved-wifi"])
