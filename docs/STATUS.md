@@ -20,10 +20,11 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Added a locked, bounded local JSONL journal for typed power lease events, with rotation, retention, and human/JSON event output.
 - [x] Added latest-session reports that derive duration only from recorded start/release events and leave interrupted sessions incomplete.
 - [x] Connected validated configuration loading to power-lease defaults/maximums and bounded journal size/retention. Config files are read-only, optional, and limited to 64 KiB.
+- [x] Added an integration test that applies a 1 MiB configured journal limit, verifies rotation, and removes a file older than the configured one-day retention in a disposable directory.
 - [x] Added architecture, threat model, acceptance matrix, contributor/security docs, changelog, issue templates, local documentation-link validation, and least-privilege Windows CI workflow.
 - [x] `cargo fmt --all` completed successfully.
 - [x] `cargo clippy --workspace --all-targets -- -D warnings` completed successfully using the Windows GNU/LLVM toolchain.
-- [x] `cargo test --workspace --all-targets -j 1` passed 29 core tests and 3 CLI tests on the Windows GNU/LLVM toolchain after the local adapter summary change.
+- [x] `cargo test --workspace --all-targets -j 1` passed 30 core tests and 3 CLI tests on the Windows GNU/LLVM toolchain after local adapter and journal configuration changes.
 - [x] `guardian doctor` ran on this Windows host and reported S3 sleep support, current power source/battery status, and that this account needs elevation for `powercfg /requests`.
 - [x] `guardian network` ran on this Windows host and returned only summary booleans/counts. The JSON smoke test showed no adapter names or addresses.
 - [x] `guardian logs` and `guardian report` passed a CLI smoke test against a disposable JSONL fixture; the JSON report matched the recorded 2-second interval. The output file did not overwrite an existing path.
@@ -31,13 +32,13 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Official `skills-ref` validation at pinned source revision `69ef37e9424c0a7ea9dd2293b559e43ec8176379` reports the skill as valid.
 - [x] Vercel Skills CLI local discovery found exactly one skill, `agent-guardian`; this did not install it.
 - [x] `cargo audit` using the checksum-verified official `cargo-audit 0.22.2` Windows binary scanned 58 locked dependencies with no advisories.
-- [x] Re-ran `cargo clippy --workspace --all-targets -- -D warnings` after local adapter summary changes; it passed.
-- [x] Re-ran `cargo fmt --all --check`, `python scripts/check-doc-links.py`, official Agent Skills validation, Skills CLI discovery, `cargo test`, and `cargo audit` after local adapter summary changes; all passed.
+- [x] Re-ran `cargo clippy --workspace --all-targets -- -D warnings` after local adapter and journal configuration changes; it passed.
+- [x] Re-ran `cargo fmt --all --check`, `python scripts/check-doc-links.py`, official Agent Skills validation, `cargo test`, and `cargo audit` after local adapter and journal configuration changes; all passed.
 - [x] Ran a Windows `guardian --json network` smoke check after the change. It returned only booleans/counts, including `tunnel_adapter_detected`, with probes and network changes reported false.
 
 ## In progress
 
-- [ ] Add deeper CLI input/error coverage and exercise configured log rotation/retention end to end.
+- [ ] Add deeper CLI input/error coverage and build a bounded, opt-in network evidence collector.
 - [ ] Expand local connectivity observation to route, DNS, VPN, captive-portal, and bounded independent endpoint evidence. Keep probes opt-in and low frequency.
 - [ ] Build verified runtime installation, upgrade, and removal flows without unnecessary elevation.
 - [ ] Validate the CI dependency/security and documentation checks on a hosted Windows runner.
@@ -70,4 +71,4 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## Next concrete action
 
-Add integration coverage for configured journal rotation/retention, then continue implementing opt-in, bounded network evidence collection. Keep network-changing behavior disabled until its evidence and authorization path are complete.
+Continue implementing opt-in, bounded network evidence collection. Keep network-changing behavior disabled until its evidence and authorization path are complete.

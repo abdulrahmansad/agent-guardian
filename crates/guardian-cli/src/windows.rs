@@ -356,12 +356,11 @@ fn event_store(config: &Config) -> Result<EventStore, String> {
     let local_app_data = std::env::var_os("LOCALAPPDATA").ok_or_else(|| {
         "LOCALAPPDATA is unavailable; cannot open the local event log".to_string()
     })?;
-    Ok(EventStore::new(
+    Ok(EventStore::from_logging_config(
         PathBuf::from(local_app_data)
             .join("AgentGuardian")
             .join("events.jsonl"),
-        u64::from(config.logging.maximum_file_size_mib) * 1024 * 1024,
-        config.logging.retention_days,
+        &config.logging,
     ))
 }
 

@@ -25,6 +25,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 19 | Service permissions resist unauthorized clients | NOT TESTED | No service/IPC planned in first slice; gate before adding it |
 | 20 | Reports reflect actual events | PASS | JSONL fixture CLI smoke test reconciled start/release timestamps and duration; a live power-lease event chain remains untested |
 | 21 | Local network snapshot omits identifiers and changes no settings | PASS | Windows 11 x64 CLI smoke test showed counts/booleans only; a pure core test covers adapter summary aggregation; source sends no probes and has no mutation calls |
+| 22 | Configured journal size and retention are enforced | PASS | Disposable-directory integration test verifies 1 MiB rotation and removal of a file older than the configured one-day retention |
 
 ## Automated test plan
 

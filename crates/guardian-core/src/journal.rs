@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use uuid::Uuid;
 
+use crate::config::LoggingConfig;
+
 const EVENT_SCHEMA_VERSION: u16 = 1;
 const ROTATED_FILE_COUNT: u8 = 3;
 
@@ -68,6 +70,14 @@ pub struct EventStore {
 }
 
 impl EventStore {
+    pub fn from_logging_config(path: impl Into<PathBuf>, config: &LoggingConfig) -> Self {
+        Self::new(
+            path,
+            u64::from(config.maximum_file_size_mib) * 1024 * 1024,
+            config.retention_days,
+        )
+    }
+
     pub fn new(path: impl Into<PathBuf>, maximum_file_bytes: u64, retention_days: u16) -> Self {
         Self {
             path: path.into(),
@@ -354,6 +364,54 @@ mod tests {
             }
         }
         assert!(store.rotated_path(2).exists());
+        cleanup(&store);
+    }
+
+    #[test]
+    fn configured_log_size_rotates_and_retention_removes_expired_files() {
+        let directory =
+            std::env::temp_dir().join(format!("agent-guardian-config-{}", Uuid::new_v4()));
+        let config = LoggingConfig {
+            maximum_file_size_mib: 1,
+            retention_days: 1,
+        };
+        let store = EventStore::from_logging_config(directory.join("events.jsonl"), &config);
+        store.prepare().unwrap();
+
+        let session_id = Uuid::new_v4();
+        let seed_event = SessionEvent::lease_started(session_id, 100);
+        let next_event = SessionEvent::lease_released(session_id, 200, ReleaseReason::TargetExited);
+        let mut seed_line = serde_json::to_vec(&seed_event).unwrap();
+        seed_line.push(b'\n');
+        let mut next_line = serde_json::to_vec(&next_event).unwrap();
+        next_line.push(b'\n');
+        assert!(next_line.len() > seed_line.len());
+        let repetitions = (1024 * 1024) / seed_line.len();
+        let seeded_log = seed_line.repeat(repetitions);
+        assert!(seeded_log.len() as u64 <= store.maximum_file_bytes);
+        assert!(seeded_log.len() + next_line.len() > store.maximum_file_bytes as usize);
+        fs::write(store.path(), &seeded_log).unwrap();
+
+        store.append(&next_event).unwrap();
+        let rotated = store.rotated_path(1);
+        assert_eq!(
+            fs::metadata(&rotated).unwrap().len(),
+            seeded_log.len() as u64
+        );
+        assert_eq!(store.read_events().unwrap().len(), repetitions + 1);
+
+        let old_time = SystemTime::now() - Duration::from_secs(2 * 24 * 60 * 60);
+        OpenOptions::new()
+            .write(true)
+            .open(&rotated)
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(old_time))
+            .unwrap();
+        store
+            .append(&SessionEvent::lease_started(Uuid::new_v4(), 300))
+            .unwrap();
+        assert!(!rotated.exists());
+        assert_eq!(store.read_events().unwrap().len(), 2);
         cleanup(&store);
     }
 
