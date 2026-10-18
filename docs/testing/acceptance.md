@@ -30,6 +30,8 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 24 | Probe behavior under real DNS, route, gateway, proxy, and captive-portal conditions | NOT TESTED | Requires a controlled network; no probe was run against the active workstation |
 | 25 | Connectivity assessment requires DNS, active default route, gateway response, and two independent endpoints before reporting healthy | PASS | Core tests verify complete evidence can classify `HEALTHY`, missing DNS/route/gateway evidence stays conservative, and gateway metadata from an inactive interface does not imply an operational route; live behavior remains untested |
 | 26 | Explicit proxy authentication rejection is classified without retrying or changing settings | PASS | HTTP status interpretation and core policy tests cover `407` → `PROXY_RESTRICTED` → `NotifyUser`; live proxy behavior remains untested |
+| 27 | Foreground local monitor starts, expires within its configured bound, and unregisters Windows notifications | PASS | Windows 11 x64 one-minute monitor smoke check emitted the initial and stopped JSON records; no local state change occurred |
+| 28 | Windows interface and route notifications refresh the privacy-limited snapshot | NOT TESTED | Requires a controlled test adapter/network and an actual interface or route change; do not disrupt the active workstation |
 
 ## Automated test plan
 

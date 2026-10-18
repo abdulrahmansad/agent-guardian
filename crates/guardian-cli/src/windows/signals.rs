@@ -51,6 +51,10 @@ pub(super) fn collect_network_signals() -> NetworkSignals {
     }
 }
 
+pub(super) fn active_default_route_status() -> Option<bool> {
+    route_and_gateway_targets().0
+}
+
 struct WinsockSession;
 
 impl WinsockSession {

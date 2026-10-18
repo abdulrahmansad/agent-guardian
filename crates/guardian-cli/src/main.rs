@@ -47,9 +47,18 @@ enum Command {
     Doctor,
     /// Inspect network state without changing adapters.
     Network {
-        /// Send two bounded connectivity probes to independent public endpoints.
+        /// Run one bounded connectivity check using fixed DNS, route, gateway, and web evidence.
         #[arg(long)]
         probe: bool,
+    },
+    /// Monitor local IP-interface and route changes in the foreground.
+    Monitor {
+        /// Maximum monitor duration in minutes (1 to 60).
+        #[arg(long)]
+        duration_minutes: Option<u32>,
+        /// Local snapshot fallback interval in seconds (30 to 3600).
+        #[arg(long)]
+        interval_seconds: Option<u32>,
     },
     /// Show local Guardian event logs.
     Logs {
@@ -107,6 +116,14 @@ fn main() -> ExitCode {
         Command::Network { probe } => {
             platform_network(args.json, probe)
         }
+        Command::Monitor { duration_minutes, interval_seconds } => {
+            let duration_minutes = duration_minutes.unwrap_or(60);
+            let interval_seconds = interval_seconds.unwrap_or(300);
+            match validate_monitor_options(duration_minutes, interval_seconds) {
+                Ok(()) => platform_monitor(args.json, duration_minutes, interval_seconds),
+                Err(error) => Err(error),
+            }
+        }
         Command::Logs { config } => platform_logs(args.json, config),
         Command::Report { output, config } => platform_report(output, args.json, config),
         Command::Install => Err("runtime installation is not available until a verified release package exists. The Agent Skill and Windows runtime are separate installs.".into()),
@@ -123,6 +140,16 @@ fn main() -> ExitCode {
 fn report_error(error: String) -> ExitCode {
     eprintln!("guardian: {error}");
     ExitCode::from(2)
+}
+
+fn validate_monitor_options(duration_minutes: u32, interval_seconds: u32) -> Result<(), String> {
+    if !(1..=60).contains(&duration_minutes) {
+        return Err("duration-minutes must be between 1 and 60".into());
+    }
+    if !(30..=3600).contains(&interval_seconds) {
+        return Err("interval-seconds must be between 30 and 3600".into());
+    }
+    Ok(())
 }
 
 fn load_config(explicit_path: Option<&Path>) -> Result<Config, String> {
@@ -220,6 +247,22 @@ fn platform_network(json: bool, probe: bool) -> Result<(), String> {
     }
 }
 
+fn platform_monitor(
+    json: bool,
+    duration_minutes: u32,
+    interval_seconds: u32,
+) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        windows::monitor(json, duration_minutes, interval_seconds)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (json, duration_minutes, interval_seconds);
+        Err("guardian monitor is available only on Windows".into())
+    }
+}
+
 fn platform_logs(json: bool, config_path: Option<PathBuf>) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -302,5 +345,39 @@ mod tests {
 
         let opt_in = Args::try_parse_from(["guardian", "network", "--probe"]).unwrap();
         assert!(matches!(opt_in.command, Command::Network { probe: true }));
+    }
+
+    #[test]
+    fn monitor_defaults_to_a_bounded_foreground_session() {
+        let args = Args::try_parse_from(["guardian", "monitor"]).unwrap();
+        assert!(matches!(
+            args.command,
+            Command::Monitor {
+                duration_minutes: None,
+                interval_seconds: None
+            }
+        ));
+        let bounded = Args::try_parse_from([
+            "guardian",
+            "monitor",
+            "--duration-minutes",
+            "60",
+            "--interval-seconds",
+            "300",
+        ])
+        .unwrap();
+        assert!(matches!(
+            bounded.command,
+            Command::Monitor {
+                duration_minutes: Some(60),
+                interval_seconds: Some(300)
+            }
+        ));
+        assert!(validate_monitor_options(1, 30).is_ok());
+        assert!(validate_monitor_options(60, 3600).is_ok());
+        assert!(validate_monitor_options(0, 300).is_err());
+        assert!(validate_monitor_options(61, 300).is_err());
+        assert!(validate_monitor_options(60, 29).is_err());
+        assert!(validate_monitor_options(60, 3601).is_err());
     }
 }

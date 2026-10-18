@@ -20,6 +20,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Added `guardian network --probe` as an explicit one-shot diagnostic with two DNS lookups, active default-route inspection, bounded ICMP gateway checks, and two fixed web checks. Redirects, server/proxy authentication, cookies, and keep-alive are disabled; results are not logged. Live network behavior is not tested.
 - [x] Integrated DNS, route, gateway, endpoint, captive-portal, and local adapter evidence with the deterministic classifier. A `HEALTHY` result requires positive DNS, default route, gateway echo, and two independent endpoint checks; absent ICMP replies remain unknown.
 - [x] Recognized an explicit HTTP `407 Proxy Authentication Required` response as `PROXY_RESTRICTED`, which leads to user notification without retries or network changes.
+- [x] Added `guardian monitor`, a foreground listener for local IP-interface and route changes, with a bounded fallback snapshot and a 60-minute maximum duration. It performs no external probes, network/power changes, recovery, or event logging.
 - [x] Added a locked, bounded local JSONL journal for typed power lease events, with rotation, retention, and human/JSON event output.
 - [x] Added latest-session reports that derive duration only from recorded start/release events and leave interrupted sessions incomplete.
 - [x] Connected validated configuration loading to power-lease defaults/maximums and bounded journal size/retention. Config files are read-only, optional, and limited to 64 KiB.
@@ -43,10 +44,11 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] `python scripts/check-doc-links.py` checked all 17 Markdown files; official `skills-ref` validation, Vercel Skills CLI local discovery, and `cargo audit` over 58 locked dependencies passed after classifier integration.
 - [x] Current network signal and proxy-classification slice: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace --all-targets -j 1` passed (38 core tests, 10 CLI tests); documentation links, official skill validation, local Skills CLI discovery, and `cargo audit` over 58 locked dependencies passed.
 - [x] Ran the Windows local-only `guardian --json network` smoke check. It reported `external_probes_attempted: false`, `internet_connectivity_tested: false`, and `network_settings_changed: false`; no live `--probe` was run.
+- [x] After adding the foreground monitor: `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, and `cargo test --workspace --all-targets -j 1` passed (38 core tests, 13 CLI tests). The documentation checker covered 18 Markdown files, official skill validation passed, local Skills CLI discovery found one skill, and `cargo audit` scanned 58 dependencies without advisories.
+- [x] Ran `guardian --json monitor --duration-minutes 1 --interval-seconds 30` on Windows 11 x64. It registered both notifications, emitted an aggregate-only initial snapshot, completed its bounded run, and emitted a stopped record. No local state change occurred during the run; actual event delivery remains unverified.
 
 ## In progress
 
-- [ ] Build a low-frequency, event-driven monitor with explicit opt-in; the current probes are one-shot only.
 - [ ] Build verified runtime installation, upgrade, and removal flows without unnecessary elevation.
 - [ ] Validate the CI dependency/security and documentation checks on a hosted Windows runner.
 
@@ -65,7 +67,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - The system-required power request has compiled but has not been held in a real user session. Idle sleep, display-off, release, crash cleanup, Win+L, S3, and battery hardware behavior remain unverified.
 - `powercfg /requests` requires an elevated shell on this host. `guardian doctor` reports the unavailable field and continues; `guardian status` returns the command's permission error.
 - The default local network snapshot uses `GetAdaptersAddresses`. The `--probe` option has not been run against a live network; DNS resolver, route, ICMP, proxy behavior (including a real HTTP 407), and total runtime are not hardware-validated.
-- The core recovery planner is deterministic policy only. DNS, route, gateway, and web outcomes now feed the classifier, but there is no reconnection, adapter restart, or continuous monitoring.
+- The core recovery planner is deterministic policy only. DNS, route, gateway, and web outcomes feed the classifier, but there is no reconnection or adapter restart. The foreground monitor observes local interface/route changes only; actual notification delivery on a controlled network has not been tested.
 - Installer, updater, service/IPC, and agent runtime integration are not implemented. Reports currently include power lease events only; network settings in the config are reserved and have no runtime effect.
 - The CI workflow has not run on GitHub. The repository remote has no refs, so hosted CI and public Skills CLI install cannot be verified.
 - No actual locked-session, Modern Standby/S3 sleep, battery, Wi-Fi recovery, installer, or real-agent integration acceptance run has been performed.
@@ -78,4 +80,4 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## Next concrete action
 
-Build a low-frequency, event-driven monitor with explicit opt-in and no recovery side effects. Keep network-changing behavior disabled until its evidence and authorization path are complete.
+Build verified per-user runtime installation, upgrade, and removal flows. Keep network-changing behavior disabled until its evidence and authorization path are complete.

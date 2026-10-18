@@ -21,6 +21,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 
+mod monitor;
 mod probes;
 mod signals;
 
@@ -576,6 +577,10 @@ pub fn network(json: bool, probe: bool) -> Result<(), String> {
         println!("No network settings were changed.");
     }
     Ok(())
+}
+
+pub fn monitor(json: bool, duration_minutes: u32, interval_seconds: u32) -> Result<(), String> {
+    monitor::run(json, duration_minutes, interval_seconds)
 }
 
 pub fn logs(json: bool, config: Config) -> Result<(), String> {

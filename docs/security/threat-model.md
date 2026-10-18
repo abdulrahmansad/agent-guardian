@@ -38,7 +38,7 @@ Last reviewed: 2026-10-18. This is an initial design document, not a completed s
 - No service, SYSTEM process, elevation, named pipe, auto-start, remote control, or arbitrary shell execution in the first slice.
 - No power-plan changes, request overrides, security-setting changes, or input simulation.
 - No plaintext Wi-Fi credentials or agent/API secrets in configuration or logs.
-- The default network command sends no probes. `guardian network --probe` explicitly sends two fixed one-shot requests; it uses Windows automatic proxy settings, disables redirects, server/proxy authentication, and cookies, discards response text, and writes no probe results to the journal. Its connectivity evidence does not authorize recovery.
+- The default network command sends no probes. `guardian monitor` is a bounded, foreground observer of local IP-interface and route changes. It reports aggregate adapter flags/counts and route presence only, does not send probes or change network/power state, and writes no network event details to the journal. `guardian network --probe` explicitly performs fixed DNS, route, gateway-ICMP, and web checks; it uses Windows automatic proxy settings, disables redirects and authentication, discards response text, and writes no probe results to the journal. Neither output authorizes recovery.
 - Real adapter disruption is opt-in and requires a controlled test device/network and explicit approval.
 
 ## Review gates
