@@ -20,6 +20,8 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
 
+mod probes;
+
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
 const WAIT_OBJECT_0: u32 = 0;
@@ -456,8 +458,14 @@ pub fn doctor(json: bool) -> Result<(), String> {
     Ok(())
 }
 
-pub fn network(json: bool) -> Result<(), String> {
-    let snapshot = local_network_snapshot()?;
+pub fn network(json: bool, probe: bool) -> Result<(), String> {
+    let mut snapshot = local_network_snapshot()?;
+    if probe {
+        let probes = probes::run_bounded_probes();
+        snapshot.external_probes_sent = probes.requests_attempted;
+        snapshot.internet_connectivity_tested = probes.requests_attempted;
+        snapshot.probes = Some(probes);
+    }
     if json {
         println!(
             "{}",
@@ -486,9 +494,27 @@ pub fn network(json: bool) -> Result<(), String> {
             snapshot.summary.tunnel_adapter_detected
         );
         println!();
-        println!("Only local adapter metadata was inspected.");
+        println!("Adapter metadata is summarized without names or address values.");
         println!("A tunnel-type interface is only a hint; VPN state is not confirmed.");
-        println!("No external probes were sent and no network settings were changed.");
+        if let Some(probes) = &snapshot.probes {
+            println!("Two fixed one-shot probe checks were requested.");
+            println!("Requests attempted: {}", probes.requests_attempted);
+            println!(
+                "Microsoft connectivity check: {}",
+                probe_label(probes.microsoft_connect_test.reachable)
+            );
+            println!(
+                "Independent HTTPS check: {}",
+                probe_label(probes.independent_https.reachable)
+            );
+            println!(
+                "Captive portal suspected: {}",
+                probes.captive_portal_suspected
+            );
+        } else {
+            println!("No external probes were sent.");
+        }
+        println!("No network settings were changed.");
     }
     Ok(())
 }
@@ -598,6 +624,8 @@ struct LocalNetworkSnapshot {
     internet_connectivity_tested: bool,
     external_probes_sent: bool,
     network_settings_changed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    probes: Option<probes::ProbeSummary>,
 }
 
 fn local_network_snapshot() -> Result<LocalNetworkSnapshot, String> {
@@ -666,4 +694,12 @@ fn power_status() -> Result<SystemPowerStatus, String> {
         ));
     }
     Ok(status)
+}
+
+fn probe_label(reachable: bool) -> &'static str {
+    if reachable {
+        "reachable"
+    } else {
+        "not confirmed"
+    }
 }

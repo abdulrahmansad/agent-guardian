@@ -25,14 +25,14 @@ These are project goals. The status section below identifies what the current de
 
 This repository is under active development. The current Windows CLI can request a bounded system-required power lease, inspect Windows power diagnostics, and refuse battery operation unless explicitly enabled. The core includes validated TOML configuration types, PID plus process-creation identity leases, conservative connectivity classification, and pure recovery decisions.
 
-The network command reports a privacy-limited local adapter snapshot. It sends no probes and performs no network changes; DNS, VPN, captive portal, upstream, and remote-service classification are not connected. There is no service, IPC endpoint, autostart entry, updater, or release installer.
+The default network command reports a privacy-limited local adapter snapshot and sends no probes. `guardian network --probe` is an explicit, one-shot opt-in that checks two fixed public endpoints. Continuous monitoring, DNS diagnosis, VPN classification, recovery, and network changes are not implemented. There is no service, IPC endpoint, autostart entry, updater, or release installer.
 
 See [development status](docs/STATUS.md), [acceptance matrix](docs/testing/acceptance.md), and [threat model](docs/security/threat-model.md).
 
 ## Features
 
 - **Power Guardian:** Experimental foreground system-required power lease. The display is not requested to stay on. User-initiated sleep, shutdown, restart, critical battery policy, Windows policy, and device behavior remain in control.
-- **Network Guardian:** Experimental local observation reports Wi-Fi adapter state, gateway presence, and a tunnel-type interface hint. It does not confirm VPN state. Conservative classification, bounded retry policy, and restart budgets are implemented in the core; active probes and recovery operations are not connected.
+- **Network Guardian:** Experimental local observation reports Wi-Fi adapter state, gateway presence, and a tunnel-type interface hint. `guardian network --probe` adds two explicit one-shot public connectivity checks. It does not confirm VPN state or perform continuous monitoring. Conservative classification, bounded retry policy, and restart budgets are implemented in the core; recovery operations are not connected.
 - **Agent integration:** The Agent Skill package passes metadata validation and local Skills CLI discovery. Remote installation and end-to-end Codex behavior have not yet been validated.
 - **Incident reports:** Power lease start/release events are written to a bounded local JSONL journal. The CLI can show the events or export a JSON report. Interrupted sessions remain marked incomplete; network incidents are not collected.
 
@@ -90,7 +90,7 @@ No service, SYSTEM process, machine-wide power-plan change, firewall change, DNS
 
 The doctor command shows available sleep states, power source, and battery percentage where Windows reports it. It also shows active power requests when Windows permits access; this device requires an elevated shell for `powercfg /requests`, and doctor reports that warning without failing the other checks. The status command shows the current output from `powercfg /requests` and may require an elevated shell. The network command reports local Wi-Fi adapter and gateway presence, operational adapter counts, and whether Windows reports a tunnel-type interface. The tunnel flag is only a hint and does not confirm that a VPN is active. The command does not expose adapter names or addresses. Use `guardian --json network` for machine-readable output. The start command holds a foreground lease and clears its request when its target exits or its lease expires. Use Ctrl+C in the owning terminal to stop it.
 
-The network command reports local Wi-Fi adapter operational state and whether Windows reports a gateway address. It does not test DNS, VPN, captive portals, upstream internet, or configured remote services. It sends no external probes. Adapter recovery is not implemented.
+By default, the network command reports local Wi-Fi adapter state, gateway presence, and a tunnel-type hint only. `guardian network --probe` opts into two fixed checks: Microsoft’s NCSI HTTP endpoint, which must return the expected `Microsoft Connect Test` text, and a Cloudflare HTTPS endpoint, which must return HTTP 200. Windows automatic proxy settings are used, while server and proxy authentication, redirects, and cookies are disabled; authenticated proxies therefore fail these checks. Response text is not logged or persisted. WinHTTP receives 2-second per-stage timeout settings, though Windows TCP retries or proxy discovery can extend total time. These checks do not independently test DNS resolution, gateway reachability, VPN state, or configured remote services, and they do not start a monitor or recovery action. Adapter recovery is not implemented. See [network probe details](docs/development/network-probes.md).
 
 Use `guardian logs` to list recorded power lease events. `guardian --json logs` returns machine-readable event data. `guardian report` summarizes the latest session, and `guardian report --output report.json` writes a JSON file without overwriting an existing path. An incomplete session has no reported protected duration.
 
@@ -109,13 +109,13 @@ Use `guardian logs` to list recorded power lease events. `guardian --json logs` 
 
 The initial architecture keeps the runtime in the interactive user session. The power layer uses a scoped system-required request. Network detection and recovery policy are separate, so uncertainty can result in waiting or user guidance without changing an adapter.
 
-See [architecture and decisions](docs/architecture/overview.md).
+See [architecture and decisions](docs/architecture/overview.md), including [one-shot network probe details](docs/development/network-probes.md).
 
 The [configuration example](config.example.toml) documents validated defaults. `guardian start`, `guardian logs`, and `guardian report` read `%LOCALAPPDATA%\AgentGuardian\config.toml` when present, or accept `--config PATH`. The CLI does not create the file. Configuration is limited to 64 KiB; network-monitoring settings are reserved and do not enable monitoring in this build.
 
 ## Privacy and security
 
-Guardian has no account requirement, cloud dependency, or mandatory telemetry. The current CLI does not collect Wi-Fi passwords, SSIDs, adapter names, IP addresses, API keys, tokens, or network traffic. Power session events are kept locally in `%LOCALAPPDATA%\AgentGuardian` with bounded rotation; records contain only a session UUID, timestamps, and typed lease events.
+Guardian has no account requirement or mandatory telemetry. The default CLI does not send network probes. When `guardian network --probe` is used, it contacts the two documented endpoints through Windows automatic proxy settings. The Microsoft NCSI check uses plain HTTP as Windows does; the response is compared in a fixed 64-byte buffer and discarded. The Cloudflare check uses HTTPS and reads only the status code. No response body or endpoint result is written to the journal. Guardian does not persist Wi-Fi passwords, SSIDs, adapter names, IP addresses, API keys, tokens, or traffic. Power session events are kept locally in `%LOCALAPPDATA%\AgentGuardian` with bounded rotation; records contain only a session UUID, timestamps, and typed lease events.
 
 The initial design avoids privilege elevation and arbitrary shell commands. See the [threat model](docs/security/threat-model.md) before relying on future recovery features. Report vulnerabilities through a private GitHub Security Advisory when the repository enables that feature.
 
@@ -125,6 +125,7 @@ The initial design avoids privilege elevation and arbitrary shell commands. See 
 - Modern Standby on battery limits ordinary power requests. The development CLI caps battery leases at five minutes.
 - Power source changes are checked every ten seconds while the foreground lease is active; an unsupported battery transition can therefore take up to one check interval to release.
 - Win+L and screen-off behavior have not been validated on physical hardware.
+- The `--probe` option performs one pair of public checks only; no background network monitor or independent DNS/gateway test exists.
 - Guardian cannot repair router, ISP, VPN-provider, DNS-provider, GitHub, OpenAI, npm, or other remote-service outages.
 - Guardian cannot restore a terminated Codex model stream or safely replay non-idempotent operations.
 - Automatic Wi-Fi reconnection and adapter recovery are not implemented.

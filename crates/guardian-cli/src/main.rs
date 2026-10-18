@@ -46,7 +46,11 @@ enum Command {
     /// Read-only environment and power diagnostics.
     Doctor,
     /// Inspect network state without changing adapters.
-    Network,
+    Network {
+        /// Send two bounded connectivity probes to independent public endpoints.
+        #[arg(long)]
+        probe: bool,
+    },
     /// Show local Guardian event logs.
     Logs {
         /// Read journal limits from this TOML file instead of the per-user default.
@@ -100,8 +104,8 @@ fn main() -> ExitCode {
         }
         Command::Status => platform_diagnostic("requests"),
         Command::Doctor => platform_doctor(args.json),
-        Command::Network => {
-            platform_network(args.json)
+        Command::Network { probe } => {
+            platform_network(args.json, probe)
         }
         Command::Logs { config } => platform_logs(args.json, config),
         Command::Report { output, config } => platform_report(output, args.json, config),
@@ -204,14 +208,14 @@ fn platform_doctor(json: bool) -> Result<(), String> {
     }
 }
 
-fn platform_network(json: bool) -> Result<(), String> {
+fn platform_network(json: bool, probe: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
-        windows::network(json)
+        windows::network(json, probe)
     }
     #[cfg(not(windows))]
     {
-        let _ = json;
+        let _ = (json, probe);
         Err("network diagnostics are available only on Windows".into())
     }
 }
@@ -286,5 +290,17 @@ mod tests {
         std::fs::write(&path, vec![b' '; (MAX_CONFIG_BYTES + 1) as usize]).unwrap();
         assert!(load_config(Some(&path)).is_err());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn external_network_probes_require_an_explicit_flag() {
+        let local_only = Args::try_parse_from(["guardian", "network"]).unwrap();
+        assert!(matches!(
+            local_only.command,
+            Command::Network { probe: false }
+        ));
+
+        let opt_in = Args::try_parse_from(["guardian", "network", "--probe"]).unwrap();
+        assert!(matches!(opt_in.command, Command::Network { probe: true }));
     }
 }

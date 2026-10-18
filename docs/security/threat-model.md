@@ -38,7 +38,7 @@ Last reviewed: 2026-10-18. This is an initial design document, not a completed s
 - No service, SYSTEM process, elevation, named pipe, auto-start, remote control, or arbitrary shell execution in the first slice.
 - No power-plan changes, request overrides, security-setting changes, or input simulation.
 - No plaintext Wi-Fi credentials or agent/API secrets in configuration or logs.
-- The current build sends no network probes. Any future probes must be bounded, documented, and separate from recovery authorization.
+- The default network command sends no probes. `guardian network --probe` explicitly sends two fixed one-shot requests; it uses Windows automatic proxy settings, disables redirects, server/proxy authentication, and cookies, discards response text, and writes no probe results to the journal. Its connectivity evidence does not authorize recovery.
 - Real adapter disruption is opt-in and requires a controlled test device/network and explicit approval.
 
 ## Review gates

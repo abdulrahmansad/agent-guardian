@@ -7,6 +7,7 @@
 - Never export or store Wi-Fi credentials.
 - Do not restart an adapter for a failed GitHub, OpenAI, npm, ISP, VPN, or other remote service.
 - Do not modify firewall, antivirus, DNS, proxy, network profiles, drivers, TCP/IP configuration, or router settings.
-- `guardian network` reads local adapter status and gateway-address presence only. It sends no probes and reveals no network names or addresses.
-- DNS, VPN, captive portal, upstream, and remote-service observation are not connected. Classification and recovery decisions in the core do not cause Windows network changes.
+- `guardian network` reads local adapter state and gateway-address presence only. It sends no probes and reveals no network names or address values.
+- Use `guardian network --probe` only when the user asks for external connectivity checks. It sends two fixed requests, displays summary results, and writes no probe results to the journal. It does not authorize recovery.
+- There is no continuous monitor or independent DNS, gateway-reachability, VPN, upstream, or remote-service classification. Classification and recovery decisions in the core do not cause Windows network changes.
 - Never claim that a completed/failed Codex stream can be resurrected. Never replay non-idempotent remote operations automatically.

@@ -21,7 +21,7 @@ Guardian cannot override a user-requested sleep, shutdown, restart, critical bat
 
 ## Connectivity interruptions
 
-When a remote operation fails, `guardian network` can report local Wi-Fi adapter operational state and gateway-address presence. It does not verify internet, DNS, VPN, captive portal, upstream, or remote-service health, so do not infer that connectivity is healthy from that snapshot. Avoid repeated requests to failing endpoints, continue independent offline work, and defer safe idempotent remote work. Never blindly replay deployments, migrations, payments, or destructive operations. Do not claim Guardian can revive a terminated model stream.
+When a remote operation fails, `guardian network` can report local Wi-Fi adapter operational state and gateway-address presence. It does not verify internet, DNS, VPN, upstream, or remote-service health. Only use `guardian network --probe` when the user asks for an external connectivity check; it sends two fixed one-shot requests and does not authorize recovery. Do not infer that all services are healthy from the probe results. Avoid repeated requests to failing endpoints, continue independent offline work, and defer safe idempotent remote work. Never blindly replay deployments, migrations, payments, or destructive operations. Do not claim Guardian can revive a terminated model stream.
 
 ## Details
 

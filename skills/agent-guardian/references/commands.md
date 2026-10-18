@@ -10,7 +10,8 @@ The skill can be installed independently with the Skills CLI. The runtime is not
 
 - guardian doctor: read-only Windows power, battery, and sleep-state diagnostics.
 - guardian status: show the Windows powercfg /requests output; this may require an elevated shell.
-- guardian network: report local Wi-Fi adapter operational state and gateway-address presence without network probes or changes; it does not test internet reachability.
+- guardian network: report local Wi-Fi adapter state, gateway presence, and a tunnel-type hint without network probes or changes.
+- guardian network --probe: explicitly send two fixed one-shot public connectivity checks through Windows automatic proxy settings. Probe results do not authorize recovery.
 - guardian logs: show the typed local power lease event journal; `--json` emits structured events. Pass `--config PATH` to select a custom config.
 - guardian report: summarize the latest session; `--output PATH` writes JSON without overwriting an existing path. Pass `--config PATH` to select a custom config.
 - guardian start: hold a foreground lease on Guardian's own process for the configured default duration (60 minutes by default).
@@ -21,4 +22,4 @@ The skill can be installed independently with the Skills CLI. The runtime is not
 
 The foreground command exits when the target process exits or the lease expires. Ctrl+C stops Guardian. Battery behavior and locked-session operation still require hardware verification. See the repository configuration guide for the 64 KiB file limit and the persistent battery opt-in behavior.
 
-DNS/VPN/captive-portal/upstream observation, network recovery, persistent installer, background service, and stop command are not available in the current build. `guardian doctor` remains usable without elevation and includes a warning if Windows denies one diagnostic. Session events remain local and bounded; an interrupted session is reported without a fabricated protected duration.
+Continuous DNS/VPN/upstream observation, network recovery, persistent installer, background service, and stop command are not available in the current build. The one-shot `--probe` can suspect a captive portal from a redirect or unexpected NCSI response but is not a complete classification. `guardian doctor` remains usable without elevation and includes a warning if Windows denies one diagnostic. Session events remain local and bounded; an interrupted session is reported without a fabricated protected duration.

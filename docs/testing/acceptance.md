@@ -24,8 +24,10 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 18 | Reboot does not restore invalid leases | NOT TESTED | Restart test; expected no persisted lease restoration initially |
 | 19 | Service permissions resist unauthorized clients | NOT TESTED | No service/IPC planned in first slice; gate before adding it |
 | 20 | Reports reflect actual events | PASS | JSONL fixture CLI smoke test reconciled start/release timestamps and duration; a live power-lease event chain remains untested |
-| 21 | Local network snapshot omits identifiers and changes no settings | PASS | Windows 11 x64 CLI smoke test showed counts/booleans only; a pure core test covers adapter summary aggregation; source sends no probes and has no mutation calls |
+| 21 | Default local snapshot omits identifiers and changes no settings | PASS | Windows 11 x64 CLI smoke test showed counts/booleans only; a pure core test covers adapter summary aggregation; the default command does not call the probe executor |
 | 22 | Configured journal size and retention are enforced | PASS | Disposable-directory integration test verifies 1 MiB rotation and removal of a file older than the configured one-day retention |
+| 23 | External connectivity probes require an explicit flag | PASS | CLI parser test verifies `guardian network` defaults to local-only and `--probe` is required; probes were not sent during tests |
+| 24 | Probe behavior under real network, proxy, and captive portal conditions | NOT TESTED | Requires a controlled network; no probe was run against the active workstation |
 
 ## Automated test plan
 
