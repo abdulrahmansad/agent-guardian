@@ -1,0 +1,25 @@
+[package]
+name = "guardian-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Command-line runtime for Agent Guardian"
+
+[[bin]]
+name = "guardian"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+guardian-core = { path = "../guardian-core" }
+serde.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+] }

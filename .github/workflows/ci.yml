@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows runner checks
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Install stable Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
+          rustup default stable-x86_64-pc-windows-msvc
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets
+
+      - name: Check local documentation links
+        run: python scripts/check-doc-links.py
+
+      - name: Install official Agent Skills validator
+        shell: pwsh
+        run: python -m pip install "git+https://github.com/agentskills/agentskills.git@69ef37e9424c0a7ea9dd2293b559e43ec8176379#subdirectory=skills-ref"
+
+      - name: Validate Agent Skill metadata
+        run: skills-ref validate skills/agent-guardian
+
+      - name: Check Skills CLI discovery
+        run: npx --yes skills add ./ --list
+
+      - name: Scan Rust dependencies for advisories
+        shell: pwsh
+        run: |
+          cargo install cargo-audit --locked --version 0.22.2 --jobs 1
+          cargo audit

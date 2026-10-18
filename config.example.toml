@@ -1,0 +1,14 @@
+[power]
+allow_on_battery = false
+default_lease_minutes = 60
+maximum_lease_minutes = 1440
+
+[networking]
+enabled = false
+grace_period_seconds = 12
+maximum_adapter_restarts_per_30_minutes = 3
+redact_network_names = true
+
+[logging]
+maximum_file_size_mib = 10
+retention_days = 14

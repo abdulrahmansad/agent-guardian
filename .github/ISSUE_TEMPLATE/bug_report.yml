@@ -1,0 +1,41 @@
+name: Bug report
+description: Report a reproducible defect or unsafe behavior
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include passwords, tokens, Wi-Fi credentials, or private logs.
+  - type: input
+    id: version
+    attributes:
+      label: Guardian version or commit
+      placeholder: 0.1.0 or commit SHA
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Windows version and architecture
+      placeholder: Windows 11 x64
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: Diagnostics and tests
+      description: Redact host names, network names, addresses, and process details if they identify you.
+    validations:
+      required: false
