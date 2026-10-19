@@ -4,7 +4,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 
 | # | Acceptance scenario | Status | Evidence / next check |
 |---:|---|---|---|
-| 1 | Protected agent remains active through idle timeout | NOT TESTED | Windows hardware run with baseline and Guardian `powercfg /requests` snapshots |
+| 1 | Protected agent remains active through idle timeout | NOT TESTED | The 2026-10-19 preflight found the laptop on battery and stopped before starting a lease. Still requires an AC hardware run with baseline and Guardian `powercfg /requests` snapshots |
 | 2 | Display can turn off while system remains awake | NOT TESTED | Verify monitor timeout and `PowerRequestSystemRequired` only |
 | 3 | Normal power behavior returns after release | NOT TESTED | Stop/expiry, then wait through configured sleep timeout |
 | 4 | Multiple concurrent sessions work | PASS | Deterministic `LeaseBook` test; multiple live Windows power-request handles are not tested |
@@ -40,6 +40,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 34 | PID-bound power lease rejects another user or session | PASS | Pure policy cases reject mismatched user/session values, and a Windows-target test verifies the current process token path. Cross-user/session execution has not been performed on a separate Windows account |
 | 35 | Same-user stop signal wakes the foreground lease waiter | PASS | Windows-target tests verify the protected event signals a waiter and reject a pre-created event with a broad ACL, without acquiring a power request; full power-request release remains NOT TESTED |
 | 36 | Detached bounded lease and opt-in monitor start, stop, and expire | PASS | Hosted Windows [CI run 39214391493](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39214391493) verifies worker acquisition, lease-bound monitor start, stop, and natural one-minute TTL expiry. On the Windows 11 x64 development laptop, an AC one-minute lease worker also started and exited after `guardian stop`. Physical sleep/display behavior, crash cleanup, and Wi-Fi recovery remain NOT TESTED |
+| 37 | Standard Skills CLI installs and removes the Codex Agent Skill | PASS | In a disposable project, the documented `npx skills add abdulrahmansad/agent-guardian --skill agent-guardian --agent codex --yes` command installed `SKILL.md` under `.agents/skills/agent-guardian`; `npx skills remove agent-guardian --yes` removed it successfully. Telemetry was disabled |
 
 ## Automated test plan
 

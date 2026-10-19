@@ -1,6 +1,6 @@
 # Local release preparation
 
-This checklist describes preparation only. It does not authorize publishing, tagging, signing, or uploading an artifact. The current runtime remains experimental, and this repository has no verified public release.
+This checklist describes preparation only. Successful pull-request and manually dispatched CI runs attach the packaged Windows build and SHA-256 sidecars as a 14-day workflow artifact for review. That local candidate is not an official release and does not authorize tagging, signing, or publishing one. The current runtime remains experimental, and this repository has no verified public release.
 
 ## Build and package
 
