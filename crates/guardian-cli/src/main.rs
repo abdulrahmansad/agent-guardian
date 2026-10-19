@@ -47,7 +47,7 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Query Windows power-request status with requestor details redacted.
+    /// Report whether Windows power-request status can be queried, with details redacted.
     Status,
     /// Read-only environment and power diagnostics.
     Doctor,
@@ -163,7 +163,7 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Command::Status => platform_diagnostic("requests"),
+        Command::Status => platform_status(args.json),
         Command::Doctor => platform_doctor(args.json),
         Command::Network {
             probe,
@@ -319,22 +319,41 @@ fn read_config(path: &Path) -> Result<Config, std::io::Error> {
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string()))
 }
 
-fn platform_diagnostic(mode: &str) -> Result<(), String> {
+fn status_output(query_available: bool, json: bool) -> String {
+    const UNAVAILABLE: &str = "Power request query unavailable; command output was suppressed. An elevated shell may be required.";
+
+    if json {
+        let warnings = if query_available {
+            Vec::<&str>::new()
+        } else {
+            vec![UNAVAILABLE]
+        };
+        let mut output = serde_json::json!({
+            "power_request_query_available": query_available,
+            "power_request_details_redacted": true,
+            "diagnostic_warnings": warnings
+        })
+        .to_string();
+        output.push('\n');
+        output
+    } else if query_available {
+        "Power request query completed; requestor details were redacted.\n".into()
+    } else {
+        format!("{UNAVAILABLE}\n")
+    }
+}
+
+fn platform_status(json: bool) -> Result<(), String> {
     #[cfg(windows)]
     {
-        let arguments = if mode == "requests" {
-            vec!["/requests"]
-        } else {
-            vec!["/a"]
-        };
-        let output = windows::powercfg(&arguments)?;
-        print!("{output}");
+        let query_available = windows::powercfg(&["/requests"]).is_ok();
+        print!("{}", status_output(query_available, json));
         Ok(())
     }
     #[cfg(not(windows))]
     {
-        let _ = mode;
-        Err("Windows power diagnostics are available only on Windows".into())
+        let _ = json;
+        Err("guardian status is available only on Windows".into())
     }
 }
 
@@ -433,6 +452,44 @@ fn platform_report(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_reports_unavailable_power_query_without_raw_details() {
+        let output = status_output(false, false);
+        assert!(output.contains("query unavailable"));
+        assert!(output.contains("elevated shell may be required"));
+        assert!(!output.contains("exit code"));
+    }
+
+    #[test]
+    fn status_accepts_global_json_flag() {
+        let args = Args::try_parse_from(["guardian", "--json", "status"]).unwrap();
+        assert!(args.json);
+        assert!(matches!(args.command, Command::Status));
+    }
+
+    #[test]
+    fn status_json_marks_query_availability_and_redaction() {
+        let output = status_output(false, true);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["power_request_query_available"], false);
+        assert_eq!(value["power_request_details_redacted"], true);
+        assert!(
+            value["diagnostic_warnings"][0]
+                .as_str()
+                .unwrap()
+                .contains("elevated shell may be required")
+        );
+    }
+
+    #[test]
+    fn status_json_reports_success_without_diagnostic_warnings() {
+        let output = status_output(true, true);
+        let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(value["power_request_query_available"], true);
+        assert_eq!(value["power_request_details_redacted"], true);
+        assert!(value["diagnostic_warnings"].as_array().unwrap().is_empty());
+    }
 
     fn unique_path(label: &str) -> PathBuf {
         let stamp = std::time::SystemTime::now()

@@ -9,7 +9,7 @@ The skill can be installed independently with the Skills CLI. No public runtime 
 ## Available development commands
 
 - guardian doctor: read-only Windows power, battery, and sleep-state diagnostics.
-- guardian status: query Windows `powercfg /requests` status with requestor names, process IDs, and paths redacted; this may require an elevated shell.
+- guardian status: report whether Windows `powercfg /requests` can be queried while redacting requestor details. If unavailable, human output says so and `--json` sets `power_request_query_available` to `false`; an elevated shell may be required.
 - guardian network: report local Wi-Fi adapter state, gateway presence, and a tunnel-type hint without network probes or changes.
 - guardian monitor: listener for local IP-interface and route changes; exits after at most 24 hours (60 minutes by default), refreshes aggregate snapshots on notifications and every five minutes by default, and emits newline-delimited JSON with `--json`. It sends no probes. `--auto-reconnect-saved-wifi` explicitly enables a 10-second disconnect grace period, no-route and single-interface policy checks, at most three saved-profile attempts with backoff, and redacted outcome logging. Adapter restarts are never performed.
 - guardian network --probe: explicitly run bounded DNS lookups, active default-route inspection, gateway ICMP checks, and two fixed one-shot web checks through Windows automatic proxy settings. The command shows a conservative classification; results do not authorize recovery.
