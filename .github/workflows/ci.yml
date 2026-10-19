@@ -47,6 +47,28 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Guardian executable exited with code $LASTEXITCODE" }
           if ($version.Trim() -ne 'guardian 0.1.0') { throw "Unexpected Guardian version output: $version" }
 
+      - name: Test per-user install and removal on runner
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path '.\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
+          $checksum = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\AgentGuardian\guardian.exe'
+          if (Test-Path -LiteralPath $installed) { throw 'Expected a clean per-user Guardian install path on the hosted runner' }
+          try {
+            & $source install --sha256 $checksum
+            if ($LASTEXITCODE -ne 0) { throw "Guardian install exited with code $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'Guardian install did not create the per-user executable' }
+
+            $installedVersion = & $installed --version
+            if ($LASTEXITCODE -ne 0) { throw "Installed Guardian exited with code $LASTEXITCODE" }
+            if ($installedVersion.Trim() -ne 'guardian 0.1.0') { throw "Unexpected installed Guardian version output: $installedVersion" }
+          }
+          finally {
+            & $source uninstall
+            if ($LASTEXITCODE -ne 0) { throw "Guardian uninstall exited with code $LASTEXITCODE" }
+            if (Test-Path -LiteralPath $installed) { throw 'Guardian uninstall left the per-user executable behind' }
+          }
+
       - name: Validate Rust crate packaging
         run: cargo package --workspace --no-verify
 
