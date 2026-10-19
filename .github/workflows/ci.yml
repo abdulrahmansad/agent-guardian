@@ -25,6 +25,17 @@ jobs:
           rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
           rustup default stable-x86_64-pc-windows-msvc
 
+      - name: Check out previous Windows candidate for upgrade smoke test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          ref: 68535d9c725ddd46e7e850e4868b8e2c8ca0d66e
+          path: previous-source
+          persist-credentials: false
+
+      - name: Build previous Windows candidate
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+        working-directory: previous-source
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -47,21 +58,31 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Guardian executable exited with code $LASTEXITCODE" }
           if ($version.Trim() -ne 'guardian 0.1.0') { throw "Unexpected Guardian version output: $version" }
 
-      - name: Test per-user install and removal on runner
+      - name: Test per-user install, upgrade, and removal on runner
         shell: pwsh
         run: |
           $source = (Resolve-Path '.\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
+          $previous = (Resolve-Path '.\previous-source\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
           $checksum = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          $previousChecksum = (Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash.ToLowerInvariant()
           $installed = Join-Path $env:LOCALAPPDATA 'Programs\AgentGuardian\guardian.exe'
           if (Test-Path -LiteralPath $installed) { throw 'Expected a clean per-user Guardian install path on the hosted runner' }
           try {
-            & $source install --sha256 $checksum
-            if ($LASTEXITCODE -ne 0) { throw "Guardian install exited with code $LASTEXITCODE" }
+            & $previous install --sha256 $previousChecksum
+            if ($LASTEXITCODE -ne 0) { throw "Previous Guardian candidate install exited with code $LASTEXITCODE" }
             if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'Guardian install did not create the per-user executable' }
 
+            $installedHash = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedHash -ne $previousChecksum) { throw 'Previous Guardian candidate was not installed byte-for-byte' }
+
+            & $source install --sha256 $checksum
+            if ($LASTEXITCODE -ne 0) { throw "Guardian candidate upgrade exited with code $LASTEXITCODE" }
+            $installedHash = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedHash -ne $checksum) { throw 'Guardian candidate upgrade did not replace the installed executable' }
+
             $installedVersion = & $installed --version
-            if ($LASTEXITCODE -ne 0) { throw "Installed Guardian exited with code $LASTEXITCODE" }
-            if ($installedVersion.Trim() -ne 'guardian 0.1.0') { throw "Unexpected installed Guardian version output: $installedVersion" }
+            if ($LASTEXITCODE -ne 0) { throw "Upgraded Guardian exited with code $LASTEXITCODE" }
+            if ($installedVersion.Trim() -ne 'guardian 0.1.0') { throw "Unexpected upgraded Guardian version output: $installedVersion" }
           }
           finally {
             & $source uninstall

@@ -91,6 +91,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## In progress
 
+- [ ] Verify the new hosted Windows upgrade smoke test, which installs the previous MSVC candidate and replaces it with the current candidate using per-run SHA-256 values. Until that run passes, only disposable-path upgrade tests and hosted install/removal checks are verified.
 - [ ] Complete the remaining clean-user upgrade and independent-checksum audit in a Windows VM. Hosted CI now covers per-user install, launch, and removal with a same-run checksum, but does not establish publisher trust or exercise upgrade in a separate VM.
 - [ ] Repeat foreground-monitor resource measurements on other supported Windows configurations. A 2026-10-19 Windows 11 x64 one-minute read-only run emitted initial/stopped JSON records; a 35.6-second sample observed 10.44 MiB peak working set and 0.000 CPU seconds at three-decimal reporting precision. Treat this as one idle sample, not a general performance baseline.
 
