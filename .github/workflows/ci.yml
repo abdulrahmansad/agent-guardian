@@ -133,6 +133,37 @@ jobs:
             Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
           }
 
+          $expiryToken = [Guid]::NewGuid().ToString('N')
+          $expiryStdout = Join-Path $env:RUNNER_TEMP "guardian-expiry-$expiryToken.out"
+          $expiryStderr = Join-Path $env:RUNNER_TEMP "guardian-expiry-$expiryToken.err"
+          $expiryWorkerId = $null
+          try {
+            $expiryLauncher = Start-Process -FilePath $source -ArgumentList @('start', '--background', '--allow-battery', '--ttl-minutes', '1') -PassThru -WindowStyle Hidden -RedirectStandardOutput $expiryStdout -RedirectStandardError $expiryStderr
+            if (-not $expiryLauncher.WaitForExit(10000)) { throw 'Guardian expiry launcher did not return promptly' }
+            $expiryOutput = Get-Content -LiteralPath $expiryStdout -Raw
+            $expiryMatch = [regex]::Match($expiryOutput, 'process (\d+)')
+            if (-not $expiryMatch.Success) { throw "Guardian did not report its expiring worker process: $expiryOutput" }
+            $expiryWorkerId = [int]$expiryMatch.Groups[1].Value
+
+            $running = $false
+            for ($i = 0; $i -lt 10; $i++) {
+              if (Get-Process -Id $expiryWorkerId -ErrorAction SilentlyContinue) { $running = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $running) { throw 'Guardian expiry worker exited before acquiring its bounded lease' }
+
+            $expired = $false
+            for ($i = 0; $i -lt 80; $i++) {
+              if (-not (Get-Process -Id $expiryWorkerId -ErrorAction SilentlyContinue)) { $expired = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $expired) { throw 'Guardian background worker did not exit when its one-minute lease expired' }
+          }
+          finally {
+            if ($expiryWorkerId -and (Get-Process -Id $expiryWorkerId -ErrorAction SilentlyContinue)) { & $source stop | Out-Null }
+            Remove-Item -LiteralPath $expiryStdout, $expiryStderr -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Validate Rust crate packaging
         run: cargo package --workspace --no-verify
 
