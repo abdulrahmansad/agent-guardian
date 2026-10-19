@@ -86,6 +86,8 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Final stop-command validation passed: formatting, Clippy with warnings denied, Windows-target workspace tests (38 CLI and 38 core), 23-file documentation-link check, Agent Skills validation, six package tests, and Rust crate packaging.
 - [x] Hosted CI run [39184285213](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39184285213) passed on `3457665`: formatting, Clippy, all Rust tests, Rust 1.89, MSVC x64 build and checksum packaging, install/launch/removal with trusted and self-hash modes, detached lease and opt-in monitor start/stop, one-minute natural TTL expiry, docs, Skills validation/discovery, and dependency audit.
 
+- [x] Hosted Windows CI run [39240751746](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39240751746) passed on `68535d9`, including Rust 1.89, Windows MSVC build/package, install/remove, detached lease/monitor lifecycle, the full suite, skill and documentation validation, and the 66-crate advisory scan. The run attached a 14-day local candidate package; the downloaded archive and embedded executable hashes matched their sidecars. This is not an official release.
+
 ## In progress
 
 - [ ] Complete the remaining clean-user upgrade and independent-checksum audit in a Windows VM. Hosted CI now covers per-user install, launch, and removal with a same-run checksum, but does not establish publisher trust or exercise upgrade in a separate VM.
