@@ -88,13 +88,13 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 ## In progress
 
 - [ ] Complete the remaining clean-user upgrade and independent-checksum audit in a Windows VM. Hosted CI now covers per-user install, launch, and removal with a same-run checksum, but does not establish publisher trust or exercise upgrade in a separate VM.
-- [ ] Repeat foreground-monitor resource measurements on other supported Windows configurations; the current measurements are from one Windows 11 x64 host.
+- [ ] Repeat foreground-monitor resource measurements on other supported Windows configurations. A 2026-10-19 Windows 11 x64 one-minute read-only run emitted initial/stopped JSON records; a 35.6-second sample observed 10.44 MiB peak working set and 0.000 CPU seconds at three-decimal reporting precision. Treat this as one idle sample, not a general performance baseline.
 
 ## Remaining work
 
 - [ ] Validate opt-in automatic saved-profile reconnection on an isolated adapter/profile and record association plus Internet-verification results; do not use the active workstation for disruptive testing. Policy tests cover grace, backoff, retry cap, and fail-closed local evidence.
 - [ ] Exercise the packaged MSVC release executable through upgrade and checksum verification in a clean-user Windows VM; hosted CI has covered install, launch, and removal with a same-run checksum, but does not establish publisher trust or replace the VM acceptance check. Do not publish artifacts without required authorization.
-- [ ] Perform Windows power request lifecycle, crash cleanup, battery transition, display-off, and locked-session checks on representative hardware.
+- [ ] Complete physical power acceptance. The Windows 11 x64 development laptop passed a brief AC power-request acquire/stop smoke; idle sleep prevention, display-off, post-release sleep timeout, crash cleanup, battery transition, and locked-session behavior remain unverified.
 - [ ] Measure idle CPU, memory, probe frequency, startup latency, event latency, and bounded log growth before making performance claims.
 - [ ] Complete the physical acceptance matrix and final security/release-readiness review after the clean-user VM and checksum-provenance checks.
 - [ ] Reassess public release readiness. Do not tag or publish a runtime release without explicit authorization.
@@ -113,7 +113,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - The Rust 1.89 local cross-check could not link Windows GNU build scripts because the available LLVM-MinGW runtime lacks GCC support libraries; the workflow's 1.89 MSVC check passed on GitHub.
 - A monitor resource capture configured for 60 seconds exited successfully but the measuring process reported 18,494.7 seconds elapsed. The host may have been suspended or delayed; discard its CPU result and do not use its sparse memory samples as a baseline.
 - The local optimized GNU/LLVM executable imports `libunwind.dll`; launching it requires the LLVM-MinGW runtime on `PATH`, and the current installer copies only `guardian.exe`. The release packager correctly rejects this binary. The MSVC artifact passes CI's import-table check and per-user install/launch/removal smoke test; neither detects DLLs loaded dynamically at runtime or authenticates the artifact publisher. A separate clean-user upgrade and independently trusted checksum check remains open. Windows Sandbox is not installed on the development host.
-- No actual locked-session, Modern Standby/S3 sleep, battery, live Wi-Fi recovery, real-profile installer, clean-user installer, or real-agent integration acceptance run has been performed. Installer file operations were tested in disposable directories.
+- No full locked-session, Modern Standby/S3 sleep, post-release sleep-timeout, battery, live Wi-Fi recovery, real-profile installer, clean-user installer, or real-agent integration acceptance run has been performed. The one-minute local power acquire/stop smoke checks process lifecycle only. Installer file operations were tested in disposable directories.
 
 ## Human-only or external gates
 
