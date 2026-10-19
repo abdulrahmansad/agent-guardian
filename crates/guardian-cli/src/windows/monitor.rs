@@ -280,6 +280,10 @@ pub(super) fn run(
     }
     if json {
         print_record("stopped", None, duration_minutes, None)?;
+    } else if auto_reconnect_saved_wifi {
+        println!(
+            "Monitor stopped. No adapter settings were changed; saved-profile reconnect attempts may have changed the active Wi-Fi connection."
+        );
     } else {
         println!("Monitor stopped. No network settings were changed.");
     }
