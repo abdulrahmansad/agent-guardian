@@ -22,7 +22,7 @@ These local observations do not prove internet or remote-service health. The mon
 
 ## Validation status
 
-Unit tests cover duration/interval validation, aggregate-only output, transition-only snapshot updates, the 10-second grace period, backoff, the three-attempt cap, and waiting for fresh state after a confirmed association. Real interface-change delivery and saved-profile connection remain **NOT TESTED**. Do not induce a live adapter disruption on a primary workstation.
+Unit tests cover duration/interval validation, aggregate-only output, transition-only snapshot updates, the 10-second grace period, backoff, the three-attempt cap, and waiting for fresh state after a confirmed association. A 2026-10-19 live test of the previous candidate observed the Wi-Fi loss externally but Guardian did not attempt recovery; the independent fallback made one native saved-profile request and confirmed association. The current Wi-Fi-specific classification fix is simulated only. Live Guardian notification delivery and recovery after that fix remain **NOT TESTED**.
 
 ## Microsoft references
 

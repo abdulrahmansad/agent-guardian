@@ -606,6 +606,30 @@ mod tests {
     }
 
     #[test]
+    fn other_operational_adapters_do_not_suppress_wifi_recovery_and_routes_still_block_it() {
+        let disconnected_wifi = NetworkObservation {
+            summary: LocalNetworkSummary {
+                wifi_adapters_detected: true,
+                operational_adapter_count: 1,
+                ..LocalNetworkSummary::default()
+            },
+            default_route_present: Some(false),
+            connected_profile_available: false,
+            connected_profile_hint: None,
+        };
+        let mut schedule = AutoReconnectSchedule::new();
+        assert!(!schedule.should_attempt(&disconnected_wifi, 0));
+        assert!(schedule.should_attempt(&disconnected_wifi, AUTO_RECOVERY_GRACE));
+
+        let route_still_present = NetworkObservation {
+            default_route_present: Some(true),
+            ..disconnected_wifi
+        };
+        let mut schedule = AutoReconnectSchedule::new();
+        assert!(!schedule.should_attempt(&route_still_present, AUTO_RECOVERY_GRACE));
+    }
+
+    #[test]
     fn confirmed_reconnect_waits_for_fresh_local_network_state() {
         let disconnected = NetworkObservation {
             summary: LocalNetworkSummary {
