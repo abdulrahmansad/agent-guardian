@@ -659,6 +659,112 @@ impl Drop for StopEvent {
     }
 }
 
+struct StartupEvent {
+    handle: Handle,
+    name: String,
+}
+
+impl StartupEvent {
+    fn create() -> Result<Self, String> {
+        let (_, sid) = stop_event_identity()?;
+        for _ in 0..3 {
+            let name = format!("Local\\AgentGuardian.Startup.{}", LeaseId::new_v4());
+            let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let descriptor = SecurityDescriptor::for_user(&sid)?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0.0,
+                bInheritHandle: 0,
+            };
+            unsafe { SetLastError(0) };
+            let handle = unsafe {
+                CreateEventExW(
+                    &attributes,
+                    wide_name.as_ptr(),
+                    CREATE_EVENT_MANUAL_RESET,
+                    STOP_EVENT_ACCESS,
+                )
+            };
+            if handle.is_null() || handle as isize == -1 {
+                return Err(format!(
+                    "could not create the background startup signal (Windows error {})",
+                    unsafe { GetLastError() }
+                ));
+            }
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                unsafe { CloseHandle(handle) };
+                continue;
+            }
+            if !matches!(stop_event_security_matches(handle, &sid), Ok(true)) {
+                unsafe { CloseHandle(handle) };
+                return Err(
+                    "background startup signal has unexpected ownership or access rules".into(),
+                );
+            }
+            return Ok(Self { handle, name });
+        }
+        Err("could not create a unique background startup signal".into())
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for StartupEvent {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+fn signal_startup_event(name: Option<&str>) -> Result<(), String> {
+    let Some(name) = name else {
+        return Ok(());
+    };
+    let suffix = name
+        .strip_prefix("Local\\AgentGuardian.Startup.")
+        .ok_or_else(|| "invalid background startup signal".to_string())?;
+    if suffix.len() != 36
+        || !suffix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == '-')
+    {
+        return Err("invalid background startup signal".into());
+    }
+    let (_, sid) = stop_event_identity()?;
+    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE | READ_CONTROL, 0, wide_name.as_ptr()) };
+    if handle.is_null() || handle as isize == -1 {
+        return Err(format!(
+            "could not open the background startup signal (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    let event = StartupSignalHandle(handle);
+    if !matches!(stop_event_security_matches(event.0, &sid), Ok(true)) {
+        return Err("background startup signal has unexpected ownership or access rules".into());
+    }
+    if unsafe { SetEvent(event.0) } == 0 {
+        return Err(format!(
+            "could not signal background startup readiness (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    Ok(())
+}
+
+struct StartupSignalHandle(Handle);
+
+impl Drop for StartupSignalHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LeaseWait {
     TargetExited,
@@ -750,6 +856,51 @@ mod stop_event_tests {
 
         assert!(StopEvent::create_named(&name, &sid).is_err());
         assert!(StopEvent::request_stop_named(&name, &sid).is_err());
+        assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_TIMEOUT);
+    }
+
+    #[test]
+    fn background_startup_event_signals_only_after_worker_initialization() {
+        let event = StartupEvent::create().unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(event.handle, 0) },
+            WAIT_TIMEOUT
+        );
+        signal_startup_event(Some(event.name())).unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(event.handle, 0) },
+            WAIT_OBJECT_0
+        );
+    }
+
+    #[test]
+    fn invalid_background_startup_event_is_rejected() {
+        assert!(signal_startup_event(Some("Global\\AgentGuardian.Startup.invalid")).is_err());
+    }
+
+    #[test]
+    fn background_startup_signal_rejects_a_broad_acl() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = format!("Local\\AgentGuardian.Startup.{}", LeaseId::new_v4());
+        let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let descriptor = SecurityDescriptor::from_sddl(&format!("O:{sid}D:P(A;;GA;;;WD)")).unwrap();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        let handle = unsafe {
+            CreateEventExW(
+                &attributes,
+                wide_name.as_ptr(),
+                CREATE_EVENT_MANUAL_RESET,
+                STOP_EVENT_ACCESS,
+            )
+        };
+        assert!(!handle.is_null() && handle as isize != -1);
+        let event = StartupSignalHandle(handle);
+
+        assert!(signal_startup_event(Some(&name)).is_err());
         assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_TIMEOUT);
     }
 }
@@ -845,12 +996,13 @@ impl Drop for ActiveLease {
 pub fn start(
     pid: Option<u32>,
     ttl_minutes: u32,
-    allow_battery: bool,
     background: bool,
     auto_reconnect_saved_wifi: bool,
     config: Config,
     config_path: Option<PathBuf>,
+    startup_event: Option<&str>,
 ) -> Result<(), String> {
+    let allow_battery = config.power.allow_on_battery;
     if background {
         if let Some(pid) = pid {
             let (process, _) = ProcessHandle::open(pid)?;
@@ -952,6 +1104,7 @@ pub fn start(
         }
         spawn_detached(&arguments, "Wi-Fi monitor")?;
     }
+    signal_startup_event(startup_event)?;
     println!("Power request active for PID {process_id} (lease {lease_id}).");
     println!(
         "The display remains eligible to turn off. Explicit Sleep, Shutdown, Restart, or critical battery behavior remains under Windows control."
@@ -1343,6 +1496,7 @@ pub fn monitor(
     interval_seconds: u32,
     auto_reconnect_saved_wifi: bool,
     config: Config,
+    startup_event: Option<&str>,
 ) -> Result<(), String> {
     monitor::run(
         json,
@@ -1351,22 +1505,84 @@ pub fn monitor(
         interval_seconds,
         auto_reconnect_saved_wifi,
         config,
+        startup_event,
     )
 }
 
 fn spawn_detached(arguments: &[OsString], purpose: &str) -> Result<(), String> {
     let executable = std::env::current_exe()
         .map_err(|error| format!("could not locate the Guardian executable: {error}"))?;
-    let child = Command::new(&executable)
-        .args(arguments)
+    let startup_event = StartupEvent::create()?;
+    let mut worker_arguments = vec![
+        OsString::from("--startup-event"),
+        OsString::from(startup_event.name()),
+    ];
+    worker_arguments.extend_from_slice(arguments);
+    let mut child = Command::new(&executable)
+        .args(worker_arguments)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
         .spawn()
         .map_err(|error| format!("could not start the background {purpose}: {error}"))?;
-    println!("Started background {purpose} (process {}).", child.id());
-    Ok(())
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match unsafe { WaitForSingleObject(startup_event.handle, 100) } {
+            WAIT_OBJECT_0 => {
+                println!(
+                    "Started background {purpose} (process {}) and confirmed it is ready.",
+                    child.id()
+                );
+                return Ok(());
+            }
+            WAIT_TIMEOUT => {}
+            WAIT_FAILED => {
+                let error = unsafe { GetLastError() };
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "could not wait for the background {purpose} to become ready (Windows error {error})"
+                ));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Windows returned an unexpected readiness result for the background {purpose}"
+                ));
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "background {purpose} exited before confirming readiness ({status}); run the equivalent foreground command to see its startup diagnostic"
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "could not inspect background {purpose} startup: {error}"
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            let cleanup = match child.kill() {
+                Ok(()) => child.wait().map(|_| ()).map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            return Err(match cleanup {
+                Ok(()) => format!(
+                    "background {purpose} did not confirm readiness within 15 seconds; the worker was stopped"
+                ),
+                Err(error) => format!(
+                    "background {purpose} did not confirm readiness within 15 seconds and worker cleanup failed: {error}"
+                ),
+            });
+        }
+    }
 }
 
 pub fn logs(json: bool, config: Config) -> Result<(), String> {

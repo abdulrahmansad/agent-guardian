@@ -4,7 +4,7 @@
 
 Agent Guardian is an early-stage Windows project for protecting long-running local AI coding sessions from idle sleep and transient connectivity failures. It combines a portable Agent Skill, an independent Rust runtime, and a conservative Windows integration.
 
-The repository contains an experimental Windows runtime with bounded foreground or detached power leases, a same-user stop command, a local network monitor, explicit one-shot diagnostics, optional bounded saved-profile Wi-Fi reconnection, local event storage and reports, and a per-user installer. The Agent Skill is publicly discoverable and its Codex project installation has been verified in a disposable project. Physical power and Wi-Fi behavior, a published runtime package, and end-to-end agent runtime integration remain unverified. Do not rely on this development build for unattended production work.
+The repository contains an experimental Windows runtime with bounded foreground or detached power leases, a same-user stop command, a local network monitor, explicit one-shot diagnostics, optional bounded saved-profile Wi-Fi reconnection, local event storage and reports, and a per-user installer. Detached start waits for the worker to confirm that its power request is active (and, when requested, that its monitor initialized). The Agent Skill is publicly discoverable and its Codex project installation has been verified in a disposable project. Physical power and Wi-Fi behavior, an official runtime release, and end-to-end agent runtime integration remain unverified. Do not rely on this development build for unattended production work.
 
 ## The use case
 

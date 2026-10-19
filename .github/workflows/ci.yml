@@ -92,7 +92,7 @@ jobs:
           $workerId = $null
           try {
             $launcher = Start-Process -FilePath $source -ArgumentList @('start', '--background', '--allow-battery', '--auto-reconnect-saved-wifi', '--ttl-minutes', '1') -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
-            if (-not $launcher.WaitForExit(10000)) { throw 'Guardian background launcher did not return promptly' }
+            if (-not $launcher.WaitForExit(20000)) { throw 'Guardian background launcher did not confirm readiness within the bounded startup window' }
             $output = Get-Content -LiteralPath $stdout -Raw
             $match = [regex]::Match($output, 'process (\d+)')
             if (-not $match.Success) { throw "Guardian did not report its worker process: $output" }
@@ -139,7 +139,7 @@ jobs:
           $expiryWorkerId = $null
           try {
             $expiryLauncher = Start-Process -FilePath $source -ArgumentList @('start', '--background', '--allow-battery', '--ttl-minutes', '1') -PassThru -WindowStyle Hidden -RedirectStandardOutput $expiryStdout -RedirectStandardError $expiryStderr
-            if (-not $expiryLauncher.WaitForExit(10000)) { throw 'Guardian expiry launcher did not return promptly' }
+            if (-not $expiryLauncher.WaitForExit(20000)) { throw 'Guardian expiry launcher did not confirm readiness within the bounded startup window' }
             $expiryOutput = Get-Content -LiteralPath $expiryStdout -Raw
             $expiryMatch = [regex]::Match($expiryOutput, 'process (\d+)')
             if (-not $expiryMatch.Success) { throw "Guardian did not report its expiring worker process: $expiryOutput" }

@@ -148,6 +148,7 @@ pub(super) fn run(
     interval_seconds: u32,
     auto_reconnect_saved_wifi: bool,
     config: Config,
+    startup_event: Option<&str>,
 ) -> Result<(), String> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(u64::from(duration_minutes) * 60);
@@ -168,6 +169,7 @@ pub(super) fn run(
     let console_handler = ConsoleHandler::install()?;
     let mut observation = observe_local_network()?;
     let mut reconnect_schedule = AutoReconnectSchedule::new();
+    super::signal_startup_event(startup_event)?;
     if json {
         print_record(
             "snapshot",

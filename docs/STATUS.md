@@ -75,9 +75,9 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Hardened the non-elevated `guardian status` experience: it now reports query availability rather than failing when Windows suppresses `powercfg /requests`, and `--json` returns an explicit redacted availability field. Local human/JSON smoke checks passed; formatting, Clippy, all 83 workspace tests (45 CLI/Windows and 38 core), 23-file docs-link validation, and Agent Skills validation passed.
 - [x] The optimized local GNU/LLVM Windows build succeeded after hardening and reports version 0.1.0. The local release packager correctly rejected it because it imports `libunwind.dll`; the standalone MSVC release check remains open.
 - [x] Added `guardian stop` for active foreground power leases in the current Windows user session. The named event uses a protected user-SID DACL and a session-specific, hashed name; Guardian checks the existing event owner and exact DACL before using it and refuses a pre-created broad-ACL event. A stop request does not claim release is complete. Windows-target tests verify ACL rejection, signaling, and waiter wakeup without acquiring a power request.
-- [x] Added `guardian start --background`, a detached same-user bounded power process. `--auto-reconnect-saved-wifi` also starts a monitor bound to the lease process; the shared protected stop event shuts both down. `guardian install` now works without an argument by self-hashing the executable, while `--sha256` remains available for a trusted external digest.
+- [x] Added `guardian start --background`, a detached same-user bounded power process. The launcher waits up to 15 seconds for the worker to confirm that its power request is active; opt-in Wi-Fi monitoring also waits for monitor initialization. `--auto-reconnect-saved-wifi` starts a monitor bound to the lease process, and the shared protected stop event shuts both down. `guardian install` works without an argument by self-hashing the executable, while `--sha256` remains available for a supplied digest.
 - [x] Verified public Skills CLI discovery, disposable Codex project installation/listing, and default project-scoped removal; the project skill list was empty after removal.
-- [x] Created the public draft PR for the authorized hardening branch. The first hosted Windows run passed formatting, Clippy, and the Rust 1.89 check, but its stop-event test exposed that elevated runners can assign a different default owner to a newly created event. Stop-event creation now sets the current user's SID as owner explicitly.
+- [x] Created the public PR for the authorized hardening branch. The PR is open and ready for review (not draft). The first hosted Windows run passed formatting, Clippy, and the Rust 1.89 check, but its stop-event test exposed that elevated runners can assign a different default owner to a newly created event. Stop-event creation now sets the current user's SID as owner explicitly.
 - [x] Hosted CI run [39177645525](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39177645525) passed on commit `6c5fc48`: formatting, Clippy, all Rust tests, Rust 1.89, MSVC release build and packaging, crate packaging, packager tests, docs links, Agent Skills validation, Skills CLI discovery, and a clean dependency audit of 66 crates with no advisories.
 - [x] The previous packaging failure found a `vcruntime140.dll` dependency. The MSVC target now requests static CRT linkage, and hosted packaging accepts the resulting executable. The CI workflow now also smoke-tests `guardian --version`; the advisory scanner install now uses a debug build to avoid spending 13+ minutes optimizing a CI-only tool.
 - [x] Final hosted CI run [39178851875](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39178851875) passed on commit `0c57b26`, including the MSVC executable `guardian --version` launch check and the faster dependency scanner. The full run completed in 7m53s; all other Windows, Rust 1.89, package, docs, Skills, and advisory steps passed.
@@ -90,6 +90,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## In progress
 
+- [ ] Verify the detached-worker readiness handshake in the updated hosted Windows MSVC CI run. The launcher now waits up to 15 seconds for power-request acquisition and, with opt-in recovery, monitor initialization; it stops a worker that misses the deadline.
 - [ ] Complete the remaining clean-user upgrade and independent-checksum audit in a Windows VM. Hosted CI now covers per-user install, launch, and removal with a same-run checksum, but does not establish publisher trust or exercise upgrade in a separate VM.
 - [ ] Repeat foreground-monitor resource measurements on other supported Windows configurations. A 2026-10-19 Windows 11 x64 one-minute read-only run emitted initial/stopped JSON records; a 35.6-second sample observed 10.44 MiB peak working set and 0.000 CPU seconds at three-decimal reporting precision. Treat this as one idle sample, not a general performance baseline.
 
@@ -104,7 +105,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## Known failures and unverified assumptions
 
-- `origin` points to the public repository `https://github.com/abdulrahmansad/agent-guardian.git`; the authorized hardening branch has an open draft PR targeting `main`.
+- `origin` points to the public repository `https://github.com/abdulrahmansad/agent-guardian.git`; the authorized hardening branch has an open, non-draft PR targeting `main`.
 - The system-required power request has compiled but has not been held in a real user session. Idle sleep, display-off, release, crash cleanup, Win+L, S3, and battery hardware behavior remain unverified.
 - The stop event rejects pre-created objects with a mismatched owner or ACL. A different account in the same session could still deny Guardian access by pre-creating the predictable name with a restrictive ACL; this fails closed and can block lease startup, but cannot take over an active lease. Separate-account behavior remains untested.
 - `powercfg /requests` requires an elevated shell on this host. `guardian doctor` reports whether the query succeeded and continues; `guardian status` now reports a redacted unavailable state with exit code 0 when permission is denied, without exposing command output. Successful elevated-query behavior remains NOT TESTED.
@@ -122,7 +123,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 - Approval for destructive/disruptive network testing on a real adapter or active network.
 - Physical-device validation across Windows 10/11, AC/battery, sleep models, locked session, and Wi-Fi hardware.
-- Authorization for a runtime release, tagging, or signed binaries if required. The existing draft PR and branch push were authorized.
+- Authorization for a runtime release, tagging, or signed binaries if required. The branch push and open PR are authorized; merging, tagging, and runtime publication are not.
 
 ## Next concrete action
 

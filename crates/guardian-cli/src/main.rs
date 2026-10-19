@@ -20,6 +20,9 @@ struct Args {
     /// Print machine-readable JSON where the command supports it.
     #[arg(long, global = true)]
     json: bool,
+    /// Internal same-user event used to confirm a detached worker is ready.
+    #[arg(long, hide = true, global = true)]
+    startup_event: Option<String>,
     #[command(subcommand)]
     command: Command,
 }
@@ -124,10 +127,11 @@ fn main() -> ExitCode {
             auto_reconnect_saved_wifi,
             config: config_path,
         } => {
-            let config = match load_config(config_path.as_deref()) {
+            let mut config = match load_config(config_path.as_deref()) {
                 Ok(config) => config,
                 Err(error) => return report_error(error),
             };
+            config.power.allow_on_battery |= allow_battery;
             let ttl_minutes = ttl_minutes.unwrap_or(config.power.default_lease_minutes);
             if !(1..=24 * 60).contains(&ttl_minutes) {
                 Err("ttl-minutes must be between 1 and 1440".to_string())
@@ -142,11 +146,11 @@ fn main() -> ExitCode {
                     windows::start(
                         pid,
                         ttl_minutes,
-                        allow_battery || config.power.allow_on_battery,
                         background,
                         auto_reconnect_saved_wifi,
                         config,
                         config_path,
+                        args.startup_event.as_deref(),
                     )
                 }
                 #[cfg(not(windows))]
@@ -158,6 +162,7 @@ fn main() -> ExitCode {
                         auto_reconnect_saved_wifi,
                         config,
                         config_path,
+                        args.startup_event.as_deref(),
                     );
                     Err("guardian start is supported only on Windows".into())
                 }
@@ -205,6 +210,7 @@ fn main() -> ExitCode {
                     interval_seconds,
                     auto_reconnect_saved_wifi,
                     config,
+                    args.startup_event.as_deref(),
                 ),
                 Err(error) => Err(error),
             }
@@ -393,6 +399,7 @@ fn platform_monitor(
     interval_seconds: u32,
     auto_reconnect_saved_wifi: bool,
     config: Config,
+    startup_event: Option<&str>,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
@@ -403,6 +410,7 @@ fn platform_monitor(
             interval_seconds,
             auto_reconnect_saved_wifi,
             config,
+            startup_event,
         )
     }
     #[cfg(not(windows))]
@@ -414,6 +422,7 @@ fn platform_monitor(
             interval_seconds,
             auto_reconnect_saved_wifi,
             config,
+            startup_event,
         );
         Err("guardian monitor is available only on Windows".into())
     }
@@ -628,6 +637,19 @@ mod tests {
                 "guardian.toml",
             ])
             .is_ok()
+        );
+
+        let startup = Args::try_parse_from([
+            "guardian",
+            "--startup-event",
+            "Local\\AgentGuardian.Startup.00000000-0000-4000-8000-000000000000",
+            "start",
+            "--background",
+        ])
+        .unwrap();
+        assert_eq!(
+            startup.startup_event.as_deref(),
+            Some("Local\\AgentGuardian.Startup.00000000-0000-4000-8000-000000000000")
         );
     }
 
