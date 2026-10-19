@@ -40,6 +40,13 @@ jobs:
       - name: Validate local runtime packaging
         run: python scripts/package_release.py --binary target/x86_64-pc-windows-msvc/release/guardian.exe --output-dir dist
 
+      - name: Smoke-test Windows executable
+        shell: pwsh
+        run: |
+          $version = & .\target\x86_64-pc-windows-msvc\release\guardian.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Guardian executable exited with code $LASTEXITCODE" }
+          if ($version.Trim() -ne 'guardian 0.1.0') { throw "Unexpected Guardian version output: $version" }
+
       - name: Validate Rust crate packaging
         run: cargo package --workspace --no-verify
 
@@ -62,7 +69,7 @@ jobs:
       - name: Scan Rust dependencies for advisories
         shell: pwsh
         run: |
-          cargo install cargo-audit --locked --version 0.22.2 --jobs 1
+          cargo install cargo-audit --locked --version 0.22.2 --debug --jobs 2
           cargo audit
 
   msrv:
