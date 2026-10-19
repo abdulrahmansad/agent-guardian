@@ -17,7 +17,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 11 | Remote OpenAI failure does not reset adapter | PASS | Core configured-service simulation returns `RemoteServiceFailure` and `NotifyUser` |
 | 12 | VPN failure does not reset physical networking | PASS | Core VPN-state simulation returns `NotifyUser`; no recovery executor exists |
 | 13 | Captive portal requests user action | PASS | Core captive-portal simulation returns `NotifyUser`; no recovery executor exists |
-| 14 | Guardian crash leaves no permanent system changes | NOT TESTED | Process termination test and post-crash `powercfg /requests` |
+| 14 | Guardian crash leaves no permanent system changes | NOT TESTED | On Windows 11 x64, forcibly terminated only a verified one-minute test worker and confirmed its process exited. Non-elevated `guardian doctor --json` reported `powercfg /requests` unavailable, so active-request cleanup was not independently confirmed |
 | 15 | Locked-session behavior is verified | NOT TESTED | Win+L on Win11 AC and supported sleep models; unit tests are insufficient |
 | 16 | Battery transitions behave safely | NOT TESTED | AC/DC transition tests; Modern Standby limitations reported |
 | 17 | Install/uninstall leave no unauthorized persistent changes | NOT TESTED | Clean-user VM install/uninstall audit |
