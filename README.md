@@ -143,7 +143,6 @@ The initial design avoids privilege elevation and arbitrary shell commands. The 
 - Automatic network recovery and adapter restarts are not implemented. The explicitly authorized one-shot saved-profile reconnect has not been tested on a controlled physical network.
 - Guardian cannot repair router, ISP, VPN-provider, DNS-provider, GitHub, OpenAI, npm, or other remote-service outages.
 - Guardian cannot restore a terminated Codex model stream or safely replay non-idempotent operations.
-- Automatic Wi-Fi reconnection and adapter recovery are not implemented.
 
 ## FAQ
 
