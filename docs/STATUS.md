@@ -83,6 +83,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [x] Hosted CI run [39179673120](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39179673120) passed on `356f474`. In addition to the full Windows/MSRV/package/docs/Skills/audit suite, a fresh hosted runner account installed the MSVC executable using its computed SHA-256, launched the installed copy, and removed it; the workflow completed in 6m13s.
 - [x] Revalidated the current Windows 11 x64 worktree: `cargo fmt --all --check`, Clippy with warnings denied, and `cargo test --workspace --all-targets` passed (38 CLI/Windows tests and 38 core tests); the documentation checker passed across 23 Markdown files, `skills-ref` accepted the skill, and the Python package tests passed (6 tests).
 - [x] Final stop-command validation passed: formatting, Clippy with warnings denied, Windows-target workspace tests (38 CLI and 38 core), 23-file documentation-link check, Agent Skills validation, six package tests, and Rust crate packaging.
+- [x] Hosted CI run [39183579429](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39183579429) passed on `e75da1c`: formatting, Clippy, all Rust tests, Rust 1.89, MSVC x64 build and checksum packaging, install/launch/removal with trusted and self-hash modes, detached lease plus opt-in monitor start/stop, docs, Skills validation/discovery, and dependency audit.
 
 ## In progress
 
@@ -95,7 +96,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [ ] Exercise the packaged MSVC release executable through upgrade and checksum verification in a clean-user Windows VM; hosted CI has covered install, launch, and removal with a same-run checksum, but does not establish publisher trust or replace the VM acceptance check. Do not publish artifacts without required authorization.
 - [ ] Perform Windows power request lifecycle, crash cleanup, battery transition, display-off, and locked-session checks on representative hardware.
 - [ ] Measure idle CPU, memory, probe frequency, startup latency, event latency, and bounded log growth before making performance claims.
-- [ ] Complete the acceptance matrix, security review, release packaging/checksums, demo, and launch copy.
+- [ ] Complete the physical acceptance matrix and final security/release-readiness review after the clean-user VM and checksum-provenance checks.
 - [ ] Reassess public release readiness. Do not tag or publish a runtime release without explicit authorization.
 
 ## Known failures and unverified assumptions
