@@ -50,7 +50,7 @@ To remove it from a project:
 
     npx skills remove agent-guardian --yes
 
-It installs only the Agent Skill; it does not install the Windows runtime or grant administrator access. The public repository has no runtime artifact yet. Remote Codex project installation and removal were verified in a disposable temporary project.
+It installs only the Agent Skill; it does not install the Windows runtime or grant administrator access. No official runtime release is available. Successful PR and manual CI runs provide a temporary local MSVC candidate package for review; see the [release preparation notes](docs/release/README.md). Remote Codex project installation and removal were verified in a disposable project.
 
 To build and run the development CLI from a Rust environment:
 
