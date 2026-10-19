@@ -95,7 +95,7 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 - [ ] Validate opt-in automatic saved-profile reconnection on an isolated adapter/profile and record association plus Internet-verification results; do not use the active workstation for disruptive testing. Policy tests cover grace, backoff, retry cap, and fail-closed local evidence.
 - [ ] Exercise the packaged MSVC release executable through upgrade and checksum verification in a clean-user Windows VM; hosted CI has covered install, launch, and removal with a same-run checksum, but does not establish publisher trust or replace the VM acceptance check. Do not publish artifacts without required authorization.
 - [ ] Complete physical power acceptance. The Windows 11 x64 development laptop passed a brief AC power-request acquire/stop smoke; idle sleep prevention, display-off, post-release sleep timeout, crash cleanup, battery transition, and locked-session behavior remain unverified.
-- [ ] Measure idle CPU, memory, probe frequency, startup latency, event latency, and bounded log growth before making performance claims.
+- [ ] Complete performance coverage on other Windows configurations and controlled event scenarios; the current CPU, memory, and startup measurements are single-host samples. The default monitor performs no external probes, and configured journal rotation/retention is tested. Live event-processing latency and sustained log-growth behavior remain unmeasured; avoid general performance claims.
 - [ ] Complete the physical acceptance matrix and final security/release-readiness review after the clean-user VM and checksum-provenance checks.
 - [ ] Reassess public release readiness. Do not tag or publish a runtime release without explicit authorization.
 
