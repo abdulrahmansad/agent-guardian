@@ -3,6 +3,7 @@ use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -56,6 +57,8 @@ const POWER_REQUEST_SYSTEM_REQUIRED: i32 = 1;
 const BATTERY_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
 const STOP_EVENT_ACCESS: u32 = EVENT_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE | READ_CONTROL;
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 const ERROR_NO_DATA: u32 = 232;
 const NETWORK_BUFFER_START_BYTES: usize = 15 * 1024;
@@ -598,12 +601,24 @@ impl StopEvent {
             println!("{{\"stop_requested\":{requested}}}");
         } else if requested {
             println!(
-                "Stop request sent to active Guardian power lease(s) in this user session; release is not confirmed."
+                "Stop request sent to active Guardian process(es) in this user session; shutdown is not confirmed."
             );
         } else {
-            println!("No active Guardian power lease was found in this user session.");
+            println!("No active Guardian process was found in this user session.");
         }
         Ok(())
+    }
+
+    fn is_signaled(&self) -> Result<bool, String> {
+        match unsafe { WaitForSingleObject(self.0, 0) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            WAIT_FAILED => Err(format!(
+                "could not inspect the Guardian stop signal (Windows error {})",
+                unsafe { GetLastError() }
+            )),
+            _ => Err("Windows returned an unexpected stop-signal result".into()),
+        }
     }
 
     fn request_stop_named(name: &[u16], sid: &str) -> Result<bool, String> {
@@ -831,8 +846,49 @@ pub fn start(
     pid: Option<u32>,
     ttl_minutes: u32,
     allow_battery: bool,
+    background: bool,
+    auto_reconnect_saved_wifi: bool,
     config: Config,
+    config_path: Option<PathBuf>,
 ) -> Result<(), String> {
+    if background {
+        if let Some(pid) = pid {
+            let (process, _) = ProcessHandle::open(pid)?;
+            if process.wait(0)? {
+                return Err(format!("process {pid} has already exited"));
+            }
+        }
+        if !allow_battery && power_status()?.ac_line_status != 1 {
+            return Err("AC power could not be confirmed. Connect AC or pass --allow-battery for a bounded lease.".into());
+        }
+        let mut arguments = vec![
+            OsString::from("start"),
+            OsString::from("--ttl-minutes"),
+            OsString::from(ttl_minutes.to_string()),
+        ];
+        if let Some(pid) = pid {
+            arguments.push(OsString::from("--pid"));
+            arguments.push(OsString::from(pid.to_string()));
+        }
+        if allow_battery {
+            arguments.push(OsString::from("--allow-battery"));
+        }
+        if auto_reconnect_saved_wifi {
+            arguments.push(OsString::from("--auto-reconnect-saved-wifi"));
+        }
+        if let Some(path) = config_path.as_deref() {
+            arguments.push(OsString::from("--config"));
+            arguments.push(path.as_os_str().to_os_string());
+        }
+        spawn_detached(&arguments, "power lease")?;
+        if auto_reconnect_saved_wifi {
+            println!(
+                "Automatic saved-profile Wi-Fi reconnect is enabled for this bounded lease (up to three attempts with backoff)."
+            );
+        }
+        return Ok(());
+    }
+
     let process_id = pid.unwrap_or_else(|| unsafe { GetCurrentProcessId() });
     let (process, creation_time) = ProcessHandle::open(process_id)?;
     if process.wait(0)? {
@@ -879,6 +935,23 @@ pub fn start(
     let session_id = LeaseId::new_v4();
     event_store.append(&SessionEvent::lease_started(session_id, unix_time_ms()))?;
     let active_lease = ActiveLease::new(power_lease, event_store, session_id);
+    if auto_reconnect_saved_wifi {
+        let mut arguments = vec![
+            OsString::from("monitor"),
+            OsString::from("--guardian-pid"),
+            OsString::from(unsafe { GetCurrentProcessId() }.to_string()),
+            OsString::from("--duration-minutes"),
+            OsString::from(ttl_minutes.to_string()),
+            OsString::from("--interval-seconds"),
+            OsString::from("300"),
+            OsString::from("--auto-reconnect-saved-wifi"),
+        ];
+        if let Some(path) = config_path.as_deref() {
+            arguments.push(OsString::from("--config"));
+            arguments.push(path.as_os_str().to_os_string());
+        }
+        spawn_detached(&arguments, "Wi-Fi monitor")?;
+    }
     println!("Power request active for PID {process_id} (lease {lease_id}).");
     println!(
         "The display remains eligible to turn off. Explicit Sleep, Shutdown, Restart, or critical battery behavior remains under Windows control."
@@ -947,7 +1020,7 @@ pub fn start(
     Ok(())
 }
 
-pub fn install(json: bool, expected_sha256: &str) -> Result<(), String> {
+pub fn install(json: bool, expected_sha256: Option<&str>) -> Result<(), String> {
     install::install(json, expected_sha256)
 }
 
@@ -1061,7 +1134,7 @@ pub fn doctor(json: bool) -> Result<(), String> {
             "power_request_details_redacted": true,
             "diagnostic_warnings": warnings,
             "locked_session_verified": false,
-            "network_recovery_enabled": false
+            "automatic_saved_profile_reconnect_default": false
         });
         println!(
             "{}",
@@ -1087,8 +1160,9 @@ pub fn doctor(json: bool) -> Result<(), String> {
             Err(error) => println!("Unavailable: {error}"),
         }
         println!("Locked-session behavior: not verified on this device.");
-        println!("Automatic network recovery: disabled.");
-        println!("A one-shot saved-profile reconnect requires an explicit network command option.");
+        println!(
+            "Automatic saved-profile Wi-Fi reconnect: opt-in via guardian start --auto-reconnect-saved-wifi or guardian monitor --auto-reconnect-saved-wifi."
+        );
     }
     Ok(())
 }
@@ -1262,8 +1336,37 @@ pub fn network(
     Ok(())
 }
 
-pub fn monitor(json: bool, duration_minutes: u32, interval_seconds: u32) -> Result<(), String> {
-    monitor::run(json, duration_minutes, interval_seconds)
+pub fn monitor(
+    json: bool,
+    guardian_pid: Option<u32>,
+    duration_minutes: u32,
+    interval_seconds: u32,
+    auto_reconnect_saved_wifi: bool,
+    config: Config,
+) -> Result<(), String> {
+    monitor::run(
+        json,
+        guardian_pid,
+        duration_minutes,
+        interval_seconds,
+        auto_reconnect_saved_wifi,
+        config,
+    )
+}
+
+fn spawn_detached(arguments: &[OsString], purpose: &str) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate the Guardian executable: {error}"))?;
+    let child = Command::new(&executable)
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|error| format!("could not start the background {purpose}: {error}"))?;
+    println!("Started background {purpose} (process {}).", child.id());
+    Ok(())
 }
 
 pub fn logs(json: bool, config: Config) -> Result<(), String> {

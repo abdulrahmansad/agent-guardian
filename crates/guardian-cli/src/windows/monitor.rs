@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
 use std::time::{Duration, Instant};
 
+use guardian_core::{ConnectivityState, RetryBackoff, classify_local_observation};
 use serde::Serialize;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -15,9 +16,15 @@ use windows_sys::Win32::System::Console::{
 };
 
 use super::signals::active_default_route_status;
-use super::{LocalNetworkSnapshot, local_network_snapshot};
+use super::{
+    Config, LocalNetworkSnapshot, ProcessHandle, StopEvent, local_network_snapshot,
+    network_event_store, record_recovery_event, unix_time_ms,
+};
 
 const EVENT_DEBOUNCE: Duration = Duration::from_millis(250);
+const AUTO_RECOVERY_GRACE: u64 = 10_000;
+const AUTO_RECOVERY_INTERVAL: Duration = Duration::from_secs(5);
+const AUTO_RECOVERY_MAX_FAILURES: u8 = 3;
 
 static WAKE_SENDER: OnceLock<SyncSender<MonitorSignal>> = OnceLock::new();
 static STOP_REQUESTED: AtomicBool = AtomicBool::new(false);
@@ -134,15 +141,33 @@ impl Drop for ConsoleHandler {
     }
 }
 
-pub(super) fn run(json: bool, duration_minutes: u32, interval_seconds: u32) -> Result<(), String> {
+pub(super) fn run(
+    json: bool,
+    guardian_pid: Option<u32>,
+    duration_minutes: u32,
+    interval_seconds: u32,
+    auto_reconnect_saved_wifi: bool,
+    config: Config,
+) -> Result<(), String> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(u64::from(duration_minutes) * 60);
     let interval = Duration::from_secs(u64::from(interval_seconds));
-    let mut next_poll = started + interval;
+    let poll_interval = if auto_reconnect_saved_wifi {
+        interval.min(AUTO_RECOVERY_INTERVAL)
+    } else {
+        interval
+    };
+    let mut next_poll = started + poll_interval;
+    let guardian_process = guardian_pid
+        .map(ProcessHandle::open)
+        .transpose()?
+        .map(|(process, _)| process);
     STOP_REQUESTED.store(false, Ordering::Release);
+    let stop_event = StopEvent::create()?;
     let (mut notifications, receiver) = NetworkChangeNotifications::register()?;
     let console_handler = ConsoleHandler::install()?;
     let mut observation = observe_local_network()?;
+    let mut reconnect_schedule = AutoReconnectSchedule::new();
     if json {
         print_record(
             "snapshot",
@@ -154,15 +179,37 @@ pub(super) fn run(json: bool, duration_minutes: u32, interval_seconds: u32) -> R
         println!(
             "Monitoring local IP-interface and route changes for up to {duration_minutes} minute(s)."
         );
-        println!(
-            "No DNS, HTTP, or ICMP probes, network changes, recovery, or event logging are performed."
-        );
+        if auto_reconnect_saved_wifi {
+            println!(
+                "Saved-profile Wi-Fi reconnect is enabled explicitly; attempts are limited to three with backoff."
+            );
+            println!(
+                "Recovery requires Wi-Fi to remain disconnected for 10 seconds with no active default route."
+            );
+        } else {
+            println!(
+                "No DNS, HTTP, or ICMP probes, network changes, recovery, or event logging are performed."
+            );
+        }
         println!("Press Ctrl+C to stop.");
         print_human_observation(&observation, "Initial local snapshot");
     }
+    maybe_auto_reconnect(
+        &observation,
+        auto_reconnect_saved_wifi,
+        &mut reconnect_schedule,
+        started,
+        &config,
+        json,
+    );
 
     loop {
-        if STOP_REQUESTED.load(Ordering::Acquire) {
+        if STOP_REQUESTED.load(Ordering::Acquire) || stop_event.is_signaled()? {
+            break;
+        }
+        if let Some(process) = guardian_process.as_ref()
+            && process.wait(0)?
+        {
             break;
         }
         let now = Instant::now();
@@ -171,7 +218,7 @@ pub(super) fn run(json: bool, duration_minutes: u32, interval_seconds: u32) -> R
         }
         let until_poll = next_poll.saturating_duration_since(now);
         let until_deadline = deadline.saturating_duration_since(now);
-        match receiver.recv_timeout(until_poll.min(until_deadline)) {
+        match receiver.recv_timeout(until_poll.min(until_deadline).min(Duration::from_secs(1))) {
             Ok(MonitorSignal::Stop) => break,
             Ok(MonitorSignal::NetworkChanged) => {
                 let debounce_deadline = (Instant::now() + EVENT_DEBOUNCE).min(deadline);
@@ -190,6 +237,14 @@ pub(super) fn run(json: bool, duration_minutes: u32, interval_seconds: u32) -> R
                     break;
                 }
                 refresh_observation(&mut observation, json, "notification", duration_minutes)?;
+                maybe_auto_reconnect(
+                    &observation,
+                    auto_reconnect_saved_wifi,
+                    &mut reconnect_schedule,
+                    started,
+                    &config,
+                    json,
+                );
             }
             Err(RecvTimeoutError::Timeout) => {
                 if Instant::now() >= deadline {
@@ -202,7 +257,15 @@ pub(super) fn run(json: bool, duration_minutes: u32, interval_seconds: u32) -> R
                         "periodic_refresh",
                         duration_minutes,
                     )?;
-                    next_poll = Instant::now() + interval;
+                    maybe_auto_reconnect(
+                        &observation,
+                        auto_reconnect_saved_wifi,
+                        &mut reconnect_schedule,
+                        started,
+                        &config,
+                        json,
+                    );
+                    next_poll = Instant::now() + poll_interval;
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -221,6 +284,98 @@ pub(super) fn run(json: bool, duration_minutes: u32, interval_seconds: u32) -> R
         println!("Monitor stopped. No network settings were changed.");
     }
     Ok(())
+}
+
+struct AutoReconnectSchedule {
+    disconnected_since_ms: Option<u64>,
+    consecutive_failures: u8,
+    awaiting_network_change: bool,
+    backoff: RetryBackoff,
+}
+
+impl AutoReconnectSchedule {
+    fn new() -> Self {
+        Self {
+            disconnected_since_ms: None,
+            consecutive_failures: 0,
+            awaiting_network_change: false,
+            backoff: RetryBackoff::new(30_000, 5 * 60_000),
+        }
+    }
+
+    fn should_attempt(&mut self, observation: &NetworkObservation, now_ms: u64) -> bool {
+        let confirmed_wifi_loss = observation.default_route_present == Some(false)
+            && classify_local_observation(&observation.summary, &[], false)
+                == ConnectivityState::WifiDisconnected;
+        if !confirmed_wifi_loss {
+            self.disconnected_since_ms = None;
+            self.awaiting_network_change = false;
+            return false;
+        }
+        if self.awaiting_network_change {
+            return false;
+        }
+        let since = *self.disconnected_since_ms.get_or_insert(now_ms);
+        self.consecutive_failures < AUTO_RECOVERY_MAX_FAILURES
+            && now_ms.saturating_sub(since) >= AUTO_RECOVERY_GRACE
+            && self.backoff.is_ready(now_ms)
+    }
+
+    fn record_result(&mut self, connection_confirmed: Option<bool>, now_ms: u64) {
+        if connection_confirmed == Some(true) {
+            self.consecutive_failures = 0;
+            self.backoff.record_success();
+            self.disconnected_since_ms = None;
+            self.awaiting_network_change = true;
+        } else {
+            self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+            self.backoff.record_failure(now_ms);
+        }
+    }
+}
+
+fn maybe_auto_reconnect(
+    observation: &NetworkObservation,
+    enabled: bool,
+    schedule: &mut AutoReconnectSchedule,
+    started: Instant,
+    config: &Config,
+    json: bool,
+) {
+    if !enabled {
+        return;
+    }
+    let now_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    if !schedule.should_attempt(observation, now_ms) {
+        return;
+    }
+
+    let outcome = super::recovery::attempt(&observation.summary, true);
+    schedule.record_result(outcome.connection_confirmed, now_ms);
+    let logged = if outcome.action_attempted {
+        record_recovery_event(network_event_store(config), &outcome, unix_time_ms())
+    } else {
+        false
+    };
+    if json {
+        let record = serde_json::json!({
+            "event": "recovery",
+            "source": "automatic_saved_profile",
+            "action_attempted": outcome.action_attempted,
+            "connection_confirmed": outcome.connection_confirmed,
+            "disposition": outcome.disposition,
+            "event_logged": logged,
+            "attempts_remaining": AUTO_RECOVERY_MAX_FAILURES.saturating_sub(schedule.consecutive_failures),
+        });
+        println!("{record}");
+    } else {
+        println!(
+            "Automatic saved-profile reconnect: {} (attempted: {}, connection confirmed: {}).",
+            outcome.disposition,
+            outcome.action_attempted,
+            option_label(outcome.connection_confirmed),
+        );
+    }
 }
 
 fn observe_local_network() -> Result<NetworkObservation, String> {
@@ -381,5 +536,61 @@ mod tests {
         };
         assert!(!observation_changed(&observation, &same));
         assert!(observation_changed(&observation, &changed));
+    }
+
+    #[test]
+    fn automatic_reconnect_is_delayed_backed_off_and_limited() {
+        let disconnected = NetworkObservation {
+            summary: LocalNetworkSummary {
+                wifi_adapters_detected: true,
+                operational_adapter_count: 0,
+                ..LocalNetworkSummary::default()
+            },
+            default_route_present: Some(false),
+        };
+        let mut schedule = AutoReconnectSchedule::new();
+
+        assert!(!schedule.should_attempt(&disconnected, 0));
+        assert!(!schedule.should_attempt(&disconnected, AUTO_RECOVERY_GRACE - 1));
+        assert!(schedule.should_attempt(&disconnected, AUTO_RECOVERY_GRACE));
+
+        schedule.record_result(Some(false), AUTO_RECOVERY_GRACE);
+        assert!(!schedule.should_attempt(&disconnected, AUTO_RECOVERY_GRACE + 29_999));
+        assert!(schedule.should_attempt(&disconnected, AUTO_RECOVERY_GRACE + 30_000));
+        schedule.record_result(None, AUTO_RECOVERY_GRACE + 30_000);
+
+        let second_retry = AUTO_RECOVERY_GRACE + 90_000;
+        assert!(schedule.should_attempt(&disconnected, second_retry));
+        schedule.record_result(Some(false), second_retry);
+        assert!(!schedule.should_attempt(&disconnected, second_retry + 600_000));
+        assert_eq!(schedule.consecutive_failures, AUTO_RECOVERY_MAX_FAILURES);
+    }
+
+    #[test]
+    fn confirmed_reconnect_waits_for_fresh_local_network_state() {
+        let disconnected = NetworkObservation {
+            summary: LocalNetworkSummary {
+                wifi_adapters_detected: true,
+                operational_adapter_count: 0,
+                ..LocalNetworkSummary::default()
+            },
+            default_route_present: Some(false),
+        };
+        let connected = NetworkObservation {
+            summary: LocalNetworkSummary {
+                wifi_adapters_detected: true,
+                wifi_adapter_operational: true,
+                operational_adapter_count: 1,
+                ..LocalNetworkSummary::default()
+            },
+            default_route_present: Some(true),
+        };
+        let mut schedule = AutoReconnectSchedule::new();
+        assert!(!schedule.should_attempt(&disconnected, 0));
+        schedule.record_result(Some(true), AUTO_RECOVERY_GRACE);
+        assert!(!schedule.should_attempt(&disconnected, 60_000));
+        assert!(!schedule.should_attempt(&connected, 60_001));
+        assert!(!schedule.should_attempt(&disconnected, 60_002));
+        assert_eq!(schedule.consecutive_failures, 0);
     }
 }

@@ -15,7 +15,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
           persist-credentials: false
 
@@ -69,6 +69,70 @@ jobs:
             if (Test-Path -LiteralPath $installed) { throw 'Guardian uninstall left the per-user executable behind' }
           }
 
+          try {
+            & $source install
+            if ($LASTEXITCODE -ne 0) { throw "Self-hash Guardian install exited with code $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'Self-hash Guardian install did not create the per-user executable' }
+            & $installed --version
+            if ($LASTEXITCODE -ne 0) { throw 'Self-hash installed Guardian did not launch' }
+          }
+          finally {
+            & $source uninstall
+            if ($LASTEXITCODE -ne 0) { throw "Self-hash Guardian uninstall exited with code $LASTEXITCODE" }
+            if (Test-Path -LiteralPath $installed) { throw 'Self-hash Guardian uninstall left the per-user executable behind' }
+          }
+
+      - name: Test detached power lease start and stop
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path '.\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
+          $token = [Guid]::NewGuid().ToString('N')
+          $stdout = Join-Path $env:RUNNER_TEMP "guardian-start-$token.out"
+          $stderr = Join-Path $env:RUNNER_TEMP "guardian-start-$token.err"
+          $workerId = $null
+          try {
+            $launcher = Start-Process -FilePath $source -ArgumentList @('start', '--background', '--allow-battery', '--auto-reconnect-saved-wifi', '--ttl-minutes', '1') -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if (-not $launcher.WaitForExit(10000)) { throw 'Guardian background launcher did not return promptly' }
+            $output = Get-Content -LiteralPath $stdout -Raw
+            $match = [regex]::Match($output, 'process (\d+)')
+            if (-not $match.Success) { throw "Guardian did not report its worker process: $output" }
+            $workerId = [int]$match.Groups[1].Value
+
+            $running = $false
+            for ($i = 0; $i -lt 10; $i++) {
+              if (Get-Process -Id $workerId -ErrorAction SilentlyContinue) { $running = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $running) { throw 'Guardian background worker exited before acquiring its bounded lease' }
+
+            $monitorId = $null
+            for ($i = 0; $i -lt 10; $i++) {
+              $monitor = Get-CimInstance Win32_Process -Filter "Name = 'guardian.exe'" | Where-Object { $_.CommandLine -like '*--guardian-pid*' -and $_.CommandLine -like "*$workerId*" } | Select-Object -First 1
+              if ($monitor) { $monitorId = [int]$monitor.ProcessId; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $monitorId) { throw 'Guardian did not start the lease-bound Wi-Fi monitor' }
+
+            & $source stop
+            if ($LASTEXITCODE -ne 0) { throw 'Guardian stop command failed' }
+            $stopped = $false
+            for ($i = 0; $i -lt 15; $i++) {
+              if (-not (Get-Process -Id $workerId -ErrorAction SilentlyContinue)) { $stopped = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $stopped) { throw 'Guardian background worker did not exit after the stop signal' }
+            $monitorStopped = $false
+            for ($i = 0; $i -lt 15; $i++) {
+              if (-not (Get-Process -Id $monitorId -ErrorAction SilentlyContinue)) { $monitorStopped = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $monitorStopped) { throw 'Guardian Wi-Fi monitor did not exit after its owning lease stopped' }
+          }
+          finally {
+            if ($workerId -and (Get-Process -Id $workerId -ErrorAction SilentlyContinue)) { & $source stop | Out-Null }
+            Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Validate Rust crate packaging
         run: cargo package --workspace --no-verify
 
@@ -99,7 +163,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
           persist-credentials: false
 

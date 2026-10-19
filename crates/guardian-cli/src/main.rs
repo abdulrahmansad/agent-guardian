@@ -26,7 +26,7 @@ struct Args {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Hold a foreground power lease until the target process exits or the lease expires.
+    /// Hold a bounded power lease until the target exits, Guardian is stopped, or it expires.
     Start {
         /// Bind the lease to a process in this Windows user and session. Defaults to Guardian itself.
         #[arg(long)]
@@ -37,6 +37,12 @@ enum Command {
         /// Explicitly permit a short lease while on battery.
         #[arg(long)]
         allow_battery: bool,
+        /// Run the lease in a detached same-user process, independent of this terminal.
+        #[arg(long)]
+        background: bool,
+        /// Explicitly enable bounded saved-profile Wi-Fi reconnect attempts during the lease.
+        #[arg(long)]
+        auto_reconnect_saved_wifi: bool,
         /// Read limits from this TOML file instead of the per-user default.
         #[arg(long)]
         config: Option<PathBuf>,
@@ -57,14 +63,23 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
-    /// Monitor local IP-interface and route changes in the foreground.
+    /// Monitor local IP-interface and route changes; reconnect only when explicitly enabled.
     Monitor {
-        /// Maximum monitor duration in minutes (1 to 60).
+        /// Internal start-process binding used by `guardian start`.
+        #[arg(long, hide = true)]
+        guardian_pid: Option<u32>,
+        /// Maximum monitor duration in minutes (1 to 1440).
         #[arg(long)]
         duration_minutes: Option<u32>,
         /// Local snapshot fallback interval in seconds (30 to 3600).
         #[arg(long)]
         interval_seconds: Option<u32>,
+        /// Explicitly enable conservative, bounded saved-profile Wi-Fi reconnect attempts.
+        #[arg(long)]
+        auto_reconnect_saved_wifi: bool,
+        /// Read journal limits from this TOML file instead of the per-user default.
+        #[arg(long)]
+        config: Option<PathBuf>,
     },
     /// Show local Guardian event logs.
     Logs {
@@ -82,13 +97,13 @@ enum Command {
     },
     /// Install or upgrade this verified executable in the current user's profile.
     Install {
-        /// SHA-256 copied from a trusted release checksum source.
+        /// Optional SHA-256 from a trusted release checksum source.
         #[arg(long)]
-        sha256: String,
+        sha256: Option<String>,
     },
     /// Remove the per-user runtime executable without deleting local data.
     Uninstall,
-    /// Stop active foreground power leases in this Windows user session.
+    /// Stop Guardian power leases and monitors in this Windows user session.
     Stop,
     /// Show the Guardian version.
     Version,
@@ -105,6 +120,8 @@ fn main() -> ExitCode {
             pid,
             ttl_minutes,
             allow_battery,
+            background,
+            auto_reconnect_saved_wifi,
             config: config_path,
         } => {
             let config = match load_config(config_path.as_deref()) {
@@ -126,12 +143,22 @@ fn main() -> ExitCode {
                         pid,
                         ttl_minutes,
                         allow_battery || config.power.allow_on_battery,
+                        background,
+                        auto_reconnect_saved_wifi,
                         config,
+                        config_path,
                     )
                 }
                 #[cfg(not(windows))]
                 {
-                    let _ = (pid, allow_battery, config);
+                    let _ = (
+                        pid,
+                        allow_battery,
+                        background,
+                        auto_reconnect_saved_wifi,
+                        config,
+                        config_path,
+                    );
                     Err("guardian start is supported only on Windows".into())
                 }
             }
@@ -154,13 +181,31 @@ fn main() -> ExitCode {
             platform_network(args.json, probe, reconnect_saved_wifi, config)
         }
         Command::Monitor {
+            guardian_pid,
             duration_minutes,
             interval_seconds,
+            auto_reconnect_saved_wifi,
+            config: config_path,
         } => {
             let duration_minutes = duration_minutes.unwrap_or(60);
             let interval_seconds = interval_seconds.unwrap_or(300);
+            let config = if config_path.is_some() || auto_reconnect_saved_wifi {
+                match load_config(config_path.as_deref()) {
+                    Ok(config) => config,
+                    Err(error) => return report_error(error),
+                }
+            } else {
+                Config::default()
+            };
             match validate_monitor_options(duration_minutes, interval_seconds) {
-                Ok(()) => platform_monitor(args.json, duration_minutes, interval_seconds),
+                Ok(()) => platform_monitor(
+                    args.json,
+                    guardian_pid,
+                    duration_minutes,
+                    interval_seconds,
+                    auto_reconnect_saved_wifi,
+                    config,
+                ),
                 Err(error) => Err(error),
             }
         }
@@ -169,7 +214,7 @@ fn main() -> ExitCode {
         Command::Install { sha256 } => {
             #[cfg(windows)]
             {
-                windows::install(args.json, &sha256)
+                windows::install(args.json, sha256.as_deref())
             }
             #[cfg(not(windows))]
             {
@@ -213,8 +258,8 @@ fn report_error(error: String) -> ExitCode {
 }
 
 fn validate_monitor_options(duration_minutes: u32, interval_seconds: u32) -> Result<(), String> {
-    if !(1..=60).contains(&duration_minutes) {
-        return Err("duration-minutes must be between 1 and 60".into());
+    if !(1..=1440).contains(&duration_minutes) {
+        return Err("duration-minutes must be between 1 and 1440".into());
     }
     if !(30..=3600).contains(&interval_seconds) {
         return Err("interval-seconds must be between 30 and 3600".into());
@@ -324,16 +369,33 @@ fn platform_network(
 
 fn platform_monitor(
     json: bool,
+    guardian_pid: Option<u32>,
     duration_minutes: u32,
     interval_seconds: u32,
+    auto_reconnect_saved_wifi: bool,
+    config: Config,
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        windows::monitor(json, duration_minutes, interval_seconds)
+        windows::monitor(
+            json,
+            guardian_pid,
+            duration_minutes,
+            interval_seconds,
+            auto_reconnect_saved_wifi,
+            config,
+        )
     }
     #[cfg(not(windows))]
     {
-        let _ = (json, duration_minutes, interval_seconds);
+        let _ = (
+            json,
+            guardian_pid,
+            duration_minutes,
+            interval_seconds,
+            auto_reconnect_saved_wifi,
+            config,
+        );
         Err("guardian monitor is available only on Windows".into())
     }
 }
@@ -464,13 +526,65 @@ mod tests {
     }
 
     #[test]
+    fn background_lease_and_automatic_reconnect_are_explicit_options() {
+        let background = Args::try_parse_from([
+            "guardian",
+            "start",
+            "--background",
+            "--auto-reconnect-saved-wifi",
+            "--ttl-minutes",
+            "30",
+        ])
+        .unwrap();
+        assert!(matches!(
+            background.command,
+            Command::Start {
+                background: true,
+                auto_reconnect_saved_wifi: true,
+                ttl_minutes: Some(30),
+                ..
+            }
+        ));
+
+        let monitor = Args::try_parse_from([
+            "guardian",
+            "monitor",
+            "--auto-reconnect-saved-wifi",
+            "--duration-minutes",
+            "30",
+        ])
+        .unwrap();
+        assert!(matches!(
+            monitor.command,
+            Command::Monitor {
+                auto_reconnect_saved_wifi: true,
+                duration_minutes: Some(30),
+                ..
+            }
+        ));
+        assert!(
+            Args::try_parse_from([
+                "guardian",
+                "monitor",
+                "--auto-reconnect-saved-wifi",
+                "--config",
+                "guardian.toml",
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn monitor_defaults_to_a_bounded_foreground_session() {
         let args = Args::try_parse_from(["guardian", "monitor"]).unwrap();
         assert!(matches!(
             args.command,
             Command::Monitor {
+                guardian_pid: None,
                 duration_minutes: None,
-                interval_seconds: None
+                interval_seconds: None,
+                auto_reconnect_saved_wifi: false,
+                config: None
             }
         ));
         let bounded = Args::try_parse_from([
@@ -485,25 +599,32 @@ mod tests {
         assert!(matches!(
             bounded.command,
             Command::Monitor {
+                guardian_pid: None,
                 duration_minutes: Some(60),
-                interval_seconds: Some(300)
+                interval_seconds: Some(300),
+                auto_reconnect_saved_wifi: false,
+                config: None
             }
         ));
         assert!(validate_monitor_options(1, 30).is_ok());
-        assert!(validate_monitor_options(60, 3600).is_ok());
+        assert!(validate_monitor_options(1440, 3600).is_ok());
         assert!(validate_monitor_options(0, 300).is_err());
-        assert!(validate_monitor_options(61, 300).is_err());
+        assert!(validate_monitor_options(1441, 300).is_err());
         assert!(validate_monitor_options(60, 29).is_err());
         assert!(validate_monitor_options(60, 3601).is_err());
     }
 
     #[test]
-    fn installer_requires_an_explicit_sha256() {
-        assert!(Args::try_parse_from(["guardian", "install"]).is_err());
+    fn installer_supports_self_hash_or_explicit_sha256() {
+        let self_hashed = Args::try_parse_from(["guardian", "install"]).unwrap();
+        assert!(matches!(
+            self_hashed.command,
+            Command::Install { sha256: None }
+        ));
         let args =
             Args::try_parse_from(["guardian", "--json", "install", "--sha256", &"a".repeat(64)])
                 .unwrap();
-        assert!(matches!(args.command, Command::Install { .. }));
+        assert!(matches!(args.command, Command::Install { sha256: Some(_) }));
         assert!(Args::try_parse_from(["guardian", "uninstall"]).is_ok());
         assert!(Args::try_parse_from(["guardian", "stop"]).is_ok());
     }

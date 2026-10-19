@@ -18,10 +18,14 @@ const MAX_EXECUTABLE_BYTES: u64 = 100 * 1024 * 1024;
 const INSTALL_SUBDIRECTORY: &str = "Programs\\AgentGuardian";
 const EXECUTABLE_NAME: &str = "guardian.exe";
 
-pub fn install(json: bool, expected_sha256: &str) -> Result<(), String> {
-    let expected = parse_sha256(expected_sha256)?;
+pub fn install(json: bool, expected_sha256: Option<&str>) -> Result<(), String> {
     let source = std::env::current_exe()
         .map_err(|error| format!("could not locate this executable: {error}"))?;
+    let expected = match expected_sha256 {
+        Some(value) => parse_sha256(value)?,
+        None => hash_file(&source)
+            .map_err(|error| format!("could not hash this executable: {error}"))?,
+    };
     let local_app_data = local_app_data_path()?;
     let outcome = install_at(&source, &local_app_data, expected)?;
 
@@ -33,6 +37,7 @@ pub fn install(json: bool, expected_sha256: &str) -> Result<(), String> {
                 "installed": true,
                 "updated": outcome == InstallOutcome::Updated,
                 "path": path,
+                "publisher_checksum_verified": expected_sha256.is_some(),
             })
         );
     } else {
@@ -48,6 +53,11 @@ pub fn install(json: bool, expected_sha256: &str) -> Result<(), String> {
             ),
         }
         println!("No PATH, startup, service, configuration, or log changes were made.");
+        if expected_sha256.is_none() {
+            println!(
+                "The installed copy was verified against this executable; publisher identity was not verified."
+            );
+        }
     }
     Ok(())
 }

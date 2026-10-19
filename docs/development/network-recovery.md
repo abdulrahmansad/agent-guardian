@@ -1,8 +1,12 @@
-# One-shot saved Wi-Fi recovery
+# Saved Wi-Fi recovery
 
-`guardian network --reconnect-saved-wifi` is an explicit, one-shot request to reconnect with an existing Windows Wi-Fi profile. The command may change the active wireless connection. It is separate from `guardian network --probe` and cannot be combined with it. The foreground monitor does not call this recovery path, and adapter restart is not implemented.
+`guardian network --reconnect-saved-wifi` is an explicit, one-shot request to reconnect with an existing Windows Wi-Fi profile. The command may change the active wireless connection. It is separate from `guardian network --probe` and cannot be combined with it. Adapter restart is not implemented.
 
-Guardian does not infer that a disconnect was accidental. Windows' documented connection-notification payload contains profile-name, SSID, and profile-XML fields; its reason code describes operation failures and is reported as success for connection-related notifications other than `wlan_notification_acm_connection_complete`. Guardian does not register for these notifications or inspect their payload. Automatic reconnection remains disabled until user-intent handling and privacy-safe behavior are demonstrated on controlled hardware. This is an inference from the documented API fields and their stated semantics, not a claim that Windows has no other diagnostic source.
+Guardian does not infer that a disconnect was accidental. Windows' documented connection-notification payload contains profile-name, SSID, and profile-XML fields; its reason code describes operation failures and is reported as success for connection-related notifications other than `wlan_notification_acm_connection_complete`. Guardian does not register for these notifications or inspect their payload. Automatic reconnection is disabled by default. The opt-in monitor relies only on sustained local Wi-Fi disconnection and route absence; controlled hardware behavior remains unverified.
+
+## Automatic mode
+
+Use `guardian monitor --auto-reconnect-saved-wifi` to enable recovery for a bounded monitor session, or add the same flag to `guardian start` to bind a detached monitor to that lease. Automatic mode checks local state every five seconds, waits for 10 seconds of confirmed Wi-Fi disconnection with no active default route, and then invokes the same saved-profile policy described below. It makes at most three consecutive reconnect evaluations with 30-second exponential backoff capped at five minutes. A confirmed association pauses retries until fresh local state arrives. It sends no external probes and never restarts an adapter. Outcomes are logged to the bounded redacted network journal.
 
 ## Preconditions
 
@@ -24,7 +28,7 @@ The implementation uses the Windows Native Wi-Fi API rather than a shell command
 
 The JSON result includes whether a connection request was accepted, whether a connection attempt was made, an optional association confirmation, a short disposition code, an optional Windows error number, whether a fresh local snapshot was obtained afterward, and whether the redacted outcome was logged. It omits wireless interface IDs and profile names. A refused action reports why the evidence was insufficient or ambiguous. A timeout reports that association was not confirmed; it does not start another attempt. If the post-action snapshot or journal write fails, the command keeps and displays the recovery result. `guardian logs` reads both bounded journals. `guardian report` includes network outcomes timestamped inside the latest power session's interval; these records are not causally linked to a lease.
 
-The policy and request sequence are covered by deterministic mock-backend tests. The Windows Native Wi-Fi calls compile in the Windows-target build, but no live reconnection has been run. Physical Wi-Fi recovery, saved-profile availability, enterprise authentication, captive portals, router outages, and behavior after a manual user disconnect are **NOT TESTED**. Treat these as release gates, and do not run a disruptive test on an active workstation without explicit approval.
+The policy, automatic grace/backoff schedule, and request sequence are covered by deterministic tests. The Windows Native Wi-Fi calls compile in the Windows-target build, but no live reconnection has been run. Physical Wi-Fi recovery, saved-profile availability, enterprise authentication, captive portals, router outages, and behavior after a manual user disconnect are **NOT TESTED**. Treat these as release gates, and do not run a disruptive test on an active workstation without explicit approval.
 
 ## Official API references
 
