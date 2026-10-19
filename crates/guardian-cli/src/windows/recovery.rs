@@ -11,11 +11,12 @@ use guardian_core::{
 use serde::Serialize;
 use windows_sys::Win32::Foundation::HANDLE;
 use windows_sys::Win32::NetworkManagement::WiFi::{
-    WLAN_CONNECTION_PARAMETERS, WLAN_INTERFACE_INFO, WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_INFO,
-    WLAN_PROFILE_INFO_LIST, WlanCloseHandle, WlanConnect, WlanEnumInterfaces, WlanFreeMemory,
-    WlanGetProfileList, WlanOpenHandle, dot11_BSS_type_infrastructure,
-    wlan_connection_mode_profile, wlan_interface_state_connected,
-    wlan_interface_state_disconnected,
+    WLAN_CONNECTION_ATTRIBUTES, WLAN_CONNECTION_PARAMETERS, WLAN_INTERFACE_INFO,
+    WLAN_INTERFACE_INFO_LIST, WLAN_PROFILE_INFO, WLAN_PROFILE_INFO_LIST, WlanCloseHandle,
+    WlanConnect, WlanEnumInterfaces, WlanFreeMemory, WlanGetProfileList, WlanOpenHandle,
+    WlanQueryInterface, dot11_BSS_type_infrastructure, wlan_connection_mode_profile,
+    wlan_interface_state_connected, wlan_interface_state_disconnected,
+    wlan_intf_opcode_current_connection,
 };
 use windows_sys::core::GUID;
 
@@ -57,7 +58,11 @@ struct WirelessInterface {
 trait RecoveryBackend {
     fn default_route_present(&mut self) -> Option<bool>;
     fn interfaces(&mut self) -> Result<Vec<WirelessInterface>, u32>;
-    fn preferred_profile(&mut self, interface: &GUID) -> Result<Option<Vec<u16>>, u32>;
+    fn preferred_profile(
+        &mut self,
+        interface: &GUID,
+        connected_profile_hint: Option<&[u16]>,
+    ) -> Result<Option<Vec<u16>>, u32>;
     fn request_connection(&mut self, interface: &GUID, profile: &[u16]) -> Result<(), u32>;
     fn interface_state(&mut self, interface: &GUID) -> Result<Option<i32>, u32>;
     fn wait(&mut self, duration: Duration);
@@ -66,9 +71,22 @@ trait RecoveryBackend {
 /// Attempt one saved-profile reconnect only after the explicit CLI authorization and local
 /// evidence both select the non-destructive reconnect action.
 pub(super) fn attempt(summary: &LocalNetworkSummary, authorized: bool) -> RecoveryReport {
+    attempt_with_profile_hint(summary, authorized, None)
+}
+
+/// Recover the profile that was active when the monitor last observed a connected WLAN.
+/// The profile hint remains in memory only and is checked against the interface's saved list.
+pub(super) fn attempt_with_profile_hint(
+    summary: &LocalNetworkSummary,
+    authorized: bool,
+    connected_profile_hint: Option<&SavedProfileHint>,
+) -> RecoveryReport {
     if !authorized {
         return RecoveryReport::blocked("authorization_required");
     }
+    let Some(connected_profile_hint) = connected_profile_hint else {
+        return RecoveryReport::blocked("connected_profile_unknown");
+    };
     if classify_local_observation(summary, &[], false) != ConnectivityState::WifiDisconnected {
         return RecoveryReport::blocked("wifi_disconnect_not_confirmed");
     }
@@ -82,12 +100,27 @@ pub(super) fn attempt(summary: &LocalNetworkSummary, authorized: bool) -> Recove
             };
         }
     };
-    run_with_backend(summary, authorized, &mut backend)
+    run_with_backend_and_profile_hint(
+        summary,
+        authorized,
+        Some(connected_profile_hint.as_slice()),
+        &mut backend,
+    )
 }
 
+#[cfg(test)]
 fn run_with_backend(
     summary: &LocalNetworkSummary,
     authorized: bool,
+    backend: &mut impl RecoveryBackend,
+) -> RecoveryReport {
+    run_with_backend_and_profile_hint(summary, authorized, None, backend)
+}
+
+fn run_with_backend_and_profile_hint(
+    summary: &LocalNetworkSummary,
+    authorized: bool,
+    connected_profile_hint: Option<&[u16]>,
     backend: &mut impl RecoveryBackend,
 ) -> RecoveryReport {
     if !authorized {
@@ -124,7 +157,7 @@ fn run_with_backend(
         return RecoveryReport::blocked("wireless_interface_not_disconnected");
     }
 
-    let profile = match backend.preferred_profile(&interface.id) {
+    let profile = match backend.preferred_profile(&interface.id, connected_profile_hint) {
         Ok(Some(profile)) => TemporaryProfile(profile),
         Ok(None) => return RecoveryReport::blocked("no_saved_profile"),
         Err(code) => return api_failure("saved_profile_lookup_failed", code),
@@ -271,6 +304,51 @@ impl NativeWifiBackend {
             })
             .collect())
     }
+
+    fn connected_profile(&self, interface: &GUID) -> Result<Option<SavedProfileHint>, u32> {
+        let mut data_size = 0_u32;
+        let mut data = ptr::null_mut::<c_void>();
+        let mut value_type = 0;
+        let status = unsafe {
+            WlanQueryInterface(
+                self.client,
+                interface,
+                wlan_intf_opcode_current_connection,
+                ptr::null(),
+                &mut data_size,
+                &mut data,
+                &mut value_type,
+            )
+        };
+        if status != 0 || data.is_null() {
+            if !data.is_null() {
+                unsafe { WlanFreeMemory(data) };
+            }
+            return if status == 0 {
+                Err(ERROR_INVALID_DATA)
+            } else {
+                Err(status)
+            };
+        }
+        if data_size < std::mem::size_of::<WLAN_CONNECTION_ATTRIBUTES>() as u32 {
+            unsafe { WlanFreeMemory(data) };
+            return Err(ERROR_INVALID_DATA);
+        }
+        let allocation = WlanConnectionAttributesAllocation(data.cast());
+        let attributes = unsafe { &*allocation.0 };
+        if attributes.isState != wlan_interface_state_connected {
+            return Ok(None);
+        }
+        let Some(end) = attributes.strProfileName.iter().position(|unit| *unit == 0) else {
+            return Err(ERROR_INVALID_DATA);
+        };
+        if end == 0 {
+            return Err(ERROR_INVALID_DATA);
+        }
+        let mut profile = attributes.strProfileName[..end].to_vec();
+        profile.push(0);
+        Ok(Some(SavedProfileHint(profile)))
+    }
 }
 
 impl RecoveryBackend for NativeWifiBackend {
@@ -282,7 +360,11 @@ impl RecoveryBackend for NativeWifiBackend {
         self.enumerate_interfaces()
     }
 
-    fn preferred_profile(&mut self, interface: &GUID) -> Result<Option<Vec<u16>>, u32> {
+    fn preferred_profile(
+        &mut self,
+        interface: &GUID,
+        connected_profile_hint: Option<&[u16]>,
+    ) -> Result<Option<Vec<u16>>, u32> {
         let mut list = ptr::null_mut::<WLAN_PROFILE_INFO_LIST>();
         let status = unsafe { WlanGetProfileList(self.client, interface, ptr::null(), &mut list) };
         if status != 0 {
@@ -309,17 +391,30 @@ impl RecoveryBackend for NativeWifiBackend {
                 .add(offset_of!(WLAN_PROFILE_INFO_LIST, ProfileInfo))
                 .cast::<WLAN_PROFILE_INFO>()
         };
-        let name = unsafe { &(*first).strProfileName };
-        let Some(end) = name.iter().position(|unit| *unit == 0) else {
-            return Err(ERROR_INVALID_DATA);
+        let profile = if let Some(hint) = connected_profile_hint {
+            (0..count).find_map(|index| {
+                let name = unsafe { &(*first.add(index)).strProfileName };
+                let end = name.iter().position(|unit| *unit == 0)?;
+                (name[..end] == hint[..hint.len().saturating_sub(1)]).then(|| {
+                    let mut profile = name[..end].to_vec();
+                    profile.push(0);
+                    profile
+                })
+            })
+        } else {
+            let name = unsafe { &(*first).strProfileName };
+            let Some(end) = name.iter().position(|unit| *unit == 0) else {
+                return Err(ERROR_INVALID_DATA);
+            };
+            if end == 0 {
+                return Err(ERROR_INVALID_DATA);
+            }
+            let mut profile = name[..end].to_vec();
+            profile.push(0);
+            Some(profile)
         };
-        if end == 0 {
-            return Err(ERROR_INVALID_DATA);
-        }
-        let mut profile = name[..end].to_vec();
-        profile.push(0);
         drop(allocation);
-        Ok(Some(profile))
+        Ok(profile)
     }
 
     fn request_connection(&mut self, interface: &GUID, profile: &[u16]) -> Result<(), u32> {
@@ -346,6 +441,20 @@ impl RecoveryBackend for NativeWifiBackend {
     fn wait(&mut self, duration: Duration) {
         thread::sleep(duration);
     }
+}
+
+/// Read the connected profile while it is available so automatic recovery can reconnect
+/// that exact saved profile after the interface disconnects. The value is zeroed on drop.
+pub(super) fn connected_profile_hint() -> Option<SavedProfileHint> {
+    let backend = NativeWifiBackend::open().ok()?;
+    let interfaces = backend.enumerate_interfaces().ok()?;
+    let [interface] = interfaces.as_slice() else {
+        return None;
+    };
+    if interface.state != wlan_interface_state_connected {
+        return None;
+    }
+    backend.connected_profile(&interface.id).ok().flatten()
 }
 
 fn guid_equal(left: &GUID, right: &GUID) -> bool {
@@ -401,6 +510,39 @@ impl Drop for TemporaryProfile {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SavedProfileHint(Vec<u16>);
+
+impl SavedProfileHint {
+    pub(super) fn as_slice(&self) -> &[u16] {
+        &self.0
+    }
+
+    #[cfg(test)]
+    pub(super) fn from_slice(profile: &[u16]) -> Self {
+        Self(profile.to_vec())
+    }
+}
+
+impl Drop for SavedProfileHint {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+struct WlanConnectionAttributesAllocation(*mut WLAN_CONNECTION_ATTRIBUTES);
+
+impl Drop for WlanConnectionAttributesAllocation {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                std::ptr::write_bytes(self.0, 0, 1);
+                WlanFreeMemory(self.0.cast());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,9 +578,20 @@ mod tests {
             Ok(self.interfaces.clone())
         }
 
-        fn preferred_profile(&mut self, _interface: &GUID) -> Result<Option<Vec<u16>>, u32> {
+        fn preferred_profile(
+            &mut self,
+            _interface: &GUID,
+            connected_profile_hint: Option<&[u16]>,
+        ) -> Result<Option<Vec<u16>>, u32> {
             self.read_calls += 1;
-            Ok(self.profile.clone())
+            Ok(match connected_profile_hint {
+                Some(hint) => self
+                    .profile
+                    .as_ref()
+                    .filter(|profile| profile.as_slice() == hint)
+                    .cloned(),
+                None => self.profile.clone(),
+            })
         }
 
         fn request_connection(&mut self, _interface: &GUID, _profile: &[u16]) -> Result<(), u32> {
@@ -516,6 +669,40 @@ mod tests {
         let report = run_with_backend(&connected, true, &mut backend);
         assert_eq!(report.disposition, "wifi_disconnect_not_confirmed");
         assert_eq!(backend.connect_requests, 0);
+    }
+
+    #[test]
+    fn automatic_recovery_requires_the_exact_previously_connected_saved_profile() {
+        let connected_profile = [b'p' as u16, 0];
+        let mut backend = ready_backend();
+        let report = run_with_backend_and_profile_hint(
+            &disconnected_summary(),
+            true,
+            Some(&connected_profile),
+            &mut backend,
+        );
+        assert!(report.action_attempted);
+        assert_eq!(report.connection_confirmed, Some(true));
+        assert_eq!(backend.connect_requests, 1);
+
+        let wrong_profile = [b'x' as u16, 0];
+        let mut backend = ready_backend();
+        let report = run_with_backend_and_profile_hint(
+            &disconnected_summary(),
+            true,
+            Some(&wrong_profile),
+            &mut backend,
+        );
+        assert!(!report.action_attempted);
+        assert_eq!(report.disposition, "no_saved_profile");
+        assert_eq!(backend.connect_requests, 0);
+    }
+
+    #[test]
+    fn automatic_recovery_does_not_guess_when_connected_profile_is_unknown() {
+        let report = attempt_with_profile_hint(&disconnected_summary(), true, None);
+        assert!(!report.action_attempted);
+        assert_eq!(report.disposition, "connected_profile_unknown");
     }
 
     #[test]

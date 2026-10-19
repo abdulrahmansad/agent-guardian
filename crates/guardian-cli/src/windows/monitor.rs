@@ -40,6 +40,9 @@ struct NetworkObservation {
     #[serde(flatten)]
     summary: guardian_core::LocalNetworkSummary,
     default_route_present: Option<bool>,
+    connected_profile_available: bool,
+    #[serde(skip)]
+    connected_profile_hint: Option<super::recovery::SavedProfileHint>,
 }
 
 #[derive(Serialize)]
@@ -167,7 +170,7 @@ pub(super) fn run(
     let stop_event = StopEvent::create()?;
     let (mut notifications, receiver) = NetworkChangeNotifications::register()?;
     let console_handler = ConsoleHandler::install()?;
-    let mut observation = observe_local_network()?;
+    let mut observation = observe_local_network(auto_reconnect_saved_wifi)?;
     let mut reconnect_schedule = AutoReconnectSchedule::new();
     super::signal_startup_event(startup_event)?;
     if json {
@@ -238,7 +241,13 @@ pub(super) fn run(
                 if STOP_REQUESTED.load(Ordering::Acquire) {
                     break;
                 }
-                refresh_observation(&mut observation, json, "notification", duration_minutes)?;
+                refresh_observation(
+                    &mut observation,
+                    json,
+                    "notification",
+                    duration_minutes,
+                    auto_reconnect_saved_wifi,
+                )?;
                 maybe_auto_reconnect(
                     &observation,
                     auto_reconnect_saved_wifi,
@@ -258,6 +267,7 @@ pub(super) fn run(
                         json,
                         "periodic_refresh",
                         duration_minutes,
+                        auto_reconnect_saved_wifi,
                     )?;
                     maybe_auto_reconnect(
                         &observation,
@@ -356,7 +366,11 @@ fn maybe_auto_reconnect(
         return;
     }
 
-    let outcome = super::recovery::attempt(&observation.summary, true);
+    let outcome = super::recovery::attempt_with_profile_hint(
+        &observation.summary,
+        true,
+        observation.connected_profile_hint.as_ref(),
+    );
     schedule.record_result(outcome.connection_confirmed, now_ms);
     let logged = if outcome.action_attempted {
         record_recovery_event(network_event_store(config), &outcome, unix_time_ms())
@@ -384,11 +398,16 @@ fn maybe_auto_reconnect(
     }
 }
 
-fn observe_local_network() -> Result<NetworkObservation, String> {
+fn observe_local_network(capture_connected_profile: bool) -> Result<NetworkObservation, String> {
     let LocalNetworkSnapshot { summary, .. } = local_network_snapshot()?;
+    let connected_profile_hint = (capture_connected_profile && summary.wifi_adapter_operational)
+        .then(super::recovery::connected_profile_hint)
+        .flatten();
     Ok(NetworkObservation {
         summary,
         default_route_present: active_default_route_status(),
+        connected_profile_available: connected_profile_hint.is_some(),
+        connected_profile_hint,
     })
 }
 
@@ -397,8 +416,13 @@ fn refresh_observation(
     json: bool,
     source: &'static str,
     duration_minutes: u32,
+    capture_connected_profile: bool,
 ) -> Result<(), String> {
-    let current = observe_local_network()?;
+    let mut current = observe_local_network(capture_connected_profile)?;
+    if !current.summary.wifi_adapter_operational {
+        current.connected_profile_hint = previous.connected_profile_hint.clone();
+        current.connected_profile_available = previous.connected_profile_available;
+    }
     if !observation_changed(previous, &current) {
         return Ok(());
     }
@@ -518,6 +542,10 @@ mod tests {
                 tunnel_adapter_operational: false,
             },
             default_route_present: Some(true),
+            connected_profile_available: true,
+            connected_profile_hint: Some(super::super::recovery::SavedProfileHint::from_slice(&[
+                112, 114, 105, 118, 97, 116, 101, 45, 116, 101, 115, 116, 0,
+            ])),
         };
         let json = serde_json::to_string(&observation).unwrap();
         assert!(json.contains("\"wifi_adapter_operational\":true"));
@@ -527,6 +555,7 @@ mod tests {
         assert!(!json.contains("2606:"));
         assert!(!json.contains("SSID"));
         assert!(!json.contains("adapter_name"));
+        assert!(!json.contains("private-test"));
     }
 
     #[test]
@@ -534,6 +563,8 @@ mod tests {
         let observation = NetworkObservation {
             summary: LocalNetworkSummary::default(),
             default_route_present: None,
+            connected_profile_available: false,
+            connected_profile_hint: None,
         };
         let same = observation.clone();
         let changed = NetworkObservation {
@@ -553,6 +584,8 @@ mod tests {
                 ..LocalNetworkSummary::default()
             },
             default_route_present: Some(false),
+            connected_profile_available: false,
+            connected_profile_hint: None,
         };
         let mut schedule = AutoReconnectSchedule::new();
 
@@ -581,6 +614,8 @@ mod tests {
                 ..LocalNetworkSummary::default()
             },
             default_route_present: Some(false),
+            connected_profile_available: false,
+            connected_profile_hint: None,
         };
         let connected = NetworkObservation {
             summary: LocalNetworkSummary {
@@ -590,6 +625,8 @@ mod tests {
                 ..LocalNetworkSummary::default()
             },
             default_route_present: Some(true),
+            connected_profile_available: false,
+            connected_profile_hint: None,
         };
         let mut schedule = AutoReconnectSchedule::new();
         assert!(!schedule.should_attempt(&disconnected, 0));
