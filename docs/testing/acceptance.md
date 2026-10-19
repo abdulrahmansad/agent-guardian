@@ -39,7 +39,7 @@ Status labels: **PASS**, **FAIL**, **BLOCKED**, **NOT TESTED**. A unit test does
 | 33 | Local adapter summary follows Windows' linked adapter list and rejects malformed links | PASS | Windows-target unit tests cover a sparse linked list, an out-of-buffer pointer, and a cycle. Live adapter enumeration during interface changes remains NOT TESTED |
 | 34 | PID-bound power lease rejects another user or session | PASS | Pure policy cases reject mismatched user/session values, and a Windows-target test verifies the current process token path. Cross-user/session execution has not been performed on a separate Windows account |
 | 35 | Same-user stop signal wakes the foreground lease waiter | PASS | Windows-target tests verify the protected event signals a waiter and reject a pre-created event with a broad ACL, without acquiring a power request; full power-request release remains NOT TESTED |
-| 36 | Detached bounded lease and opt-in monitor start, stop, and expire | PASS | Hosted Windows CI verifies the launcher returns, the worker acquires its lease, the monitor starts bound to that worker, `guardian stop` terminates both, and a separate one-minute lease exits naturally at TTL. Physical sleep/display behavior, crash cleanup, and Wi-Fi recovery remain NOT TESTED |
+| 36 | Detached bounded lease and opt-in monitor start, stop, and expire | PASS | Hosted Windows [CI run 39210933404](https://github.com/abdulrahmansad/agent-guardian/actions/runs/39210933404) verifies the launcher returns, the worker acquires its lease, the monitor starts bound to that worker, `guardian stop` terminates both, and a separate one-minute lease exits naturally at TTL. Physical sleep/display behavior, crash cleanup, and Wi-Fi recovery remain NOT TESTED |
 
 ## Automated test plan
 
