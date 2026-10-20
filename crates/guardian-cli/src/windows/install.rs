@@ -127,7 +127,7 @@ fn schedule_self_uninstall(local_app_data: &Path) -> Result<(), String> {
         .collect();
     let folder_base64 = encode_base64(&folder_utf16);
     let script = format!(
-        "$targetPid={};$created=[long]{creation_time};$deadline=(Get-Date).AddSeconds(30);while($true){{if((Get-Date) -ge $deadline){{exit 4}};$p=Get-Process -Id $targetPid -ErrorAction SilentlyContinue;if($null -eq $p){{break}};$actual=[long]$p.StartTime.ToUniversalTime().ToFileTimeUtc();if([Math]::Abs($actual-$created) -gt 10000000){{exit 3}};Start-Sleep -Milliseconds 200}};$base=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'));$dir=Join-Path $base '{}';$file=Join-Path $dir '{}';if(Test-Path -LiteralPath $file -PathType Leaf){{Remove-Item -LiteralPath $file -Force -ErrorAction Stop}};if(Test-Path -LiteralPath $dir -PathType Container){{try{{Remove-Item -LiteralPath $dir -Force -ErrorAction Stop}}catch{{}}}}",
+        "$targetPid={};$created={creation_time};$deadline=(Get-Date).AddSeconds(30);while($true){{if((Get-Date)-ge $deadline){{exit 4}};$p=Get-Process -Id $targetPid -ErrorAction SilentlyContinue;if($null -eq $p){{break}};if($p.StartTime.ToUniversalTime().ToFileTimeUtc() -ne $created){{exit 3}};Start-Sleep -Milliseconds 200}};$base=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'));$dir=Join-Path $base '{}';$file=Join-Path $dir '{}';if(Test-Path -LiteralPath $file -PathType Leaf){{Remove-Item -LiteralPath $file -Force -ErrorAction Stop}};if(Test-Path -LiteralPath $dir -PathType Container){{try{{Remove-Item -LiteralPath $dir -Force -ErrorAction Stop}}catch{{}}}}",
         unsafe { super::GetCurrentProcessId() },
         folder_base64,
         INSTALL_SUBDIRECTORY,
