@@ -44,7 +44,7 @@ The command removes only `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe`, a
 
 ## Verification status
 
-Installer and uninstaller file operations are covered by Windows tests using disposable temporary directories, including a path with spaces and non-ASCII characters, checksum rejection, upgrade, removal, preservation of unrelated files, and protection against self-deletion. No install or uninstall was performed in the current user's profile. A clean-user VM audit, published release checksum verification, and end-to-end upgrade/removal from release artifacts remain **NOT TESTED**.
+Installer and uninstaller file operations are covered by Windows tests using disposable temporary directories, including a path with spaces and non-ASCII characters, checksum rejection, upgrade, removal, preservation of unrelated files, and protection against self-deletion. On 2026-10-20, a verified candidate was temporarily installed in the current user's profile and removed using a separate Guardian executable; the executable and Guardian processes were confirmed absent afterward. Uninstall from the installed executable itself refuses self-deletion. A clean-user VM audit, published release checksum verification, and end-to-end upgrade/removal from release artifacts remain **NOT TESTED**.
 
 ## Microsoft API references
 
