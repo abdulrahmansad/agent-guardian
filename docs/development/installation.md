@@ -34,7 +34,7 @@ Installing a newer executable uses the same command. Run the new executable from
 
 ## Remove
 
-Run `guardian stop`, then run `guardian uninstall`. From the installed executable, Guardian launches a fixed, encoded PowerShell cleanup command that retries removal of only the fixed installed executable path until Windows releases its file lock, for up to 30 seconds. The command reports that removal is scheduled; verify that the executable disappears if you need confirmation. From another executable, removal is immediate:
+Run `guardian stop`, then run `guardian uninstall`. From the installed executable, Guardian launches a fixed, encoded PowerShell cleanup command that waits for the current Guardian process to exit and removes only the fixed installed executable path. The command reports that removal is scheduled; verify that the executable disappears if you need confirmation. From another executable, removal is immediate:
 
 ```powershell
 & '.\guardian.exe' uninstall

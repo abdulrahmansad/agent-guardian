@@ -116,6 +116,10 @@ pub fn uninstall(json: bool) -> Result<(), String> {
 }
 
 fn schedule_self_uninstall(local_app_data: &Path) -> Result<(), String> {
+    let (process, creation_time) =
+        super::ProcessHandle::open(unsafe { super::GetCurrentProcessId() })?;
+    drop(process);
+
     let folder_utf16: Vec<u8> = local_app_data
         .as_os_str()
         .encode_wide()
@@ -123,8 +127,11 @@ fn schedule_self_uninstall(local_app_data: &Path) -> Result<(), String> {
         .collect();
     let folder_base64 = encode_base64(&folder_utf16);
     let script = format!(
-        "$base=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'));$dir=Join-Path $base '{}';$file=Join-Path $dir '{}';$deadline=(Get-Date).AddSeconds(30);while(Test-Path -LiteralPath $file -PathType Leaf){{try{{Remove-Item -LiteralPath $file -Force -ErrorAction Stop;break}}catch{{if((Get-Date) -ge $deadline){{exit 4}};Start-Sleep -Milliseconds 200}}}};if(Test-Path -LiteralPath $dir -PathType Container){{try{{Remove-Item -LiteralPath $dir -Force -ErrorAction Stop}}catch{{}}}}",
-        folder_base64, INSTALL_SUBDIRECTORY, EXECUTABLE_NAME,
+        "$targetPid={};$created=[long]{creation_time};$deadline=(Get-Date).AddSeconds(30);while($true){{if((Get-Date) -ge $deadline){{exit 4}};$p=Get-Process -Id $targetPid -ErrorAction SilentlyContinue;if($null -eq $p){{break}};$actual=[long]$p.StartTime.ToUniversalTime().ToFileTimeUtc();if([Math]::Abs($actual-$created) -gt 10000000){{exit 3}};Start-Sleep -Milliseconds 200}};$base=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'));$dir=Join-Path $base '{}';$file=Join-Path $dir '{}';if(Test-Path -LiteralPath $file -PathType Leaf){{Remove-Item -LiteralPath $file -Force -ErrorAction Stop}};if(Test-Path -LiteralPath $dir -PathType Container){{try{{Remove-Item -LiteralPath $dir -Force -ErrorAction Stop}}catch{{}}}}",
+        unsafe { super::GetCurrentProcessId() },
+        folder_base64,
+        INSTALL_SUBDIRECTORY,
+        EXECUTABLE_NAME,
     );
     let encoded_script = encode_base64(
         &script
