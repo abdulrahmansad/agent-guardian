@@ -34,6 +34,9 @@ enum Command {
         /// Bind the lease to a process in this Windows user and session. Defaults to Guardian itself.
         #[arg(long)]
         pid: Option<u32>,
+        /// Internal process-creation identity carried to a detached worker.
+        #[arg(long, hide = true)]
+        target_creation_time: Option<u64>,
         /// Maximum lease duration (1 to 1440 minutes).
         #[arg(long)]
         ttl_minutes: Option<u32>,
@@ -121,6 +124,7 @@ fn main() -> ExitCode {
         }
         Command::Start {
             pid,
+            target_creation_time,
             ttl_minutes,
             allow_battery,
             background,
@@ -144,7 +148,10 @@ fn main() -> ExitCode {
                 #[cfg(windows)]
                 {
                     windows::start(
-                        pid,
+                        windows::TargetProcess {
+                            pid,
+                            creation_time_100ns: target_creation_time,
+                        },
                         ttl_minutes,
                         background,
                         auto_reconnect_saved_wifi,
@@ -157,6 +164,7 @@ fn main() -> ExitCode {
                 {
                     let _ = (
                         pid,
+                        target_creation_time,
                         allow_battery,
                         background,
                         auto_reconnect_saved_wifi,

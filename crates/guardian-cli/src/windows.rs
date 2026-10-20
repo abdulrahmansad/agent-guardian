@@ -40,8 +40,9 @@ use windows_sys::Win32::Security::{
 use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
 use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
 use windows_sys::Win32::System::Threading::{
-    CREATE_EVENT_MANUAL_RESET, CreateEventExW, EVENT_MODIFY_STATE, GetCurrentProcess, OpenEventW,
-    OpenProcessToken, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects,
+    CREATE_EVENT_MANUAL_RESET, CREATE_MUTEX_INITIAL_OWNER, CreateEventExW, CreateMutexExW,
+    EVENT_MODIFY_STATE, GetCurrentProcess, MUTEX_MODIFY_STATE, OpenEventW, OpenProcessToken,
+    ReleaseMutex, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects,
 };
 
 mod install;
@@ -379,7 +380,11 @@ impl SecurityDescriptor {
     fn for_user(sid: &str) -> Result<Self, String> {
         // Set the event owner explicitly. On elevated Windows runners the
         // token's default owner can be Administrators rather than TokenUser.
-        let sddl = format!("O:{sid}D:P(A;;0x{:08x};;;{sid})", STOP_EVENT_ACCESS);
+        Self::for_user_access(sid, STOP_EVENT_ACCESS)
+    }
+
+    fn for_user_access(sid: &str, access: u32) -> Result<Self, String> {
+        let sddl = format!("O:{sid}D:P(A;;0x{access:08x};;;{sid})");
         Self::from_sddl(&sddl)
     }
 
@@ -408,6 +413,71 @@ impl SecurityDescriptor {
         }
         Ok(Self(LocalAllocation(descriptor)))
     }
+}
+
+pub(super) struct AutoReconnectMonitorLease(Handle);
+
+impl AutoReconnectMonitorLease {
+    fn acquire() -> Result<Self, String> {
+        let (_, sid) = stop_event_identity()?;
+        let digest = Sha256::digest(sid.as_bytes());
+        let suffix = digest
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let name = format!("Local\\AgentGuardian.AutoReconnect.{suffix}");
+        let wide_name = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        Self::create_named(&wide_name, &sid)
+    }
+
+    fn create_named(name: &[u16], sid: &str) -> Result<Self, String> {
+        let access = MUTEX_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE;
+        let descriptor = SecurityDescriptor::for_user_access(sid, access)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        unsafe { SetLastError(0) };
+        let handle = unsafe {
+            CreateMutexExW(
+                &attributes,
+                name.as_ptr(),
+                CREATE_MUTEX_INITIAL_OWNER,
+                access,
+            )
+        };
+        if handle.is_null() || handle as isize == -1 {
+            return Err(format!(
+                "could not reserve the automatic Wi-Fi recovery monitor (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            return Err(
+                "an automatic Wi-Fi recovery monitor is already active in this user session".into(),
+            );
+        }
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for AutoReconnectMonitorLease {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+pub(super) fn acquire_auto_reconnect_monitor_lease() -> Result<AutoReconnectMonitorLease, String> {
+    AutoReconnectMonitorLease::acquire()
 }
 
 fn sid_from_text(sid: &str) -> Result<LocalAllocation, String> {
@@ -993,8 +1063,13 @@ impl Drop for ActiveLease {
     }
 }
 
+pub struct TargetProcess {
+    pub pid: Option<u32>,
+    pub creation_time_100ns: Option<u64>,
+}
+
 pub fn start(
-    pid: Option<u32>,
+    target: TargetProcess,
     ttl_minutes: u32,
     background: bool,
     auto_reconnect_saved_wifi: bool,
@@ -1002,14 +1077,24 @@ pub fn start(
     config_path: Option<PathBuf>,
     startup_event: Option<&str>,
 ) -> Result<(), String> {
+    let TargetProcess {
+        pid,
+        creation_time_100ns: target_creation_time,
+    } = target;
     let allow_battery = config.power.allow_on_battery;
     if background {
-        if let Some(pid) = pid {
-            let (process, _) = ProcessHandle::open(pid)?;
+        if target_creation_time.is_some() {
+            return Err("target process identity is only accepted by the detached worker".into());
+        }
+        let expected_target_creation_time = if let Some(pid) = pid {
+            let (process, creation_time) = ProcessHandle::open(pid)?;
             if process.wait(0)? {
                 return Err(format!("process {pid} has already exited"));
             }
-        }
+            Some(creation_time)
+        } else {
+            None
+        };
         if !allow_battery && power_status()?.ac_line_status != 1 {
             return Err("AC power could not be confirmed. Connect AC or pass --allow-battery for a bounded lease.".into());
         }
@@ -1021,6 +1106,11 @@ pub fn start(
         if let Some(pid) = pid {
             arguments.push(OsString::from("--pid"));
             arguments.push(OsString::from(pid.to_string()));
+            let creation_time = expected_target_creation_time.ok_or_else(|| {
+                "could not capture target process identity before detached startup".to_string()
+            })?;
+            arguments.push(OsString::from("--target-creation-time"));
+            arguments.push(OsString::from(creation_time.to_string()));
         }
         if allow_battery {
             arguments.push(OsString::from("--allow-battery"));
@@ -1043,6 +1133,10 @@ pub fn start(
 
     let process_id = pid.unwrap_or_else(|| unsafe { GetCurrentProcessId() });
     let (process, creation_time) = ProcessHandle::open(process_id)?;
+    if startup_event.is_some() && pid.is_some() && target_creation_time.is_none() {
+        return Err("detached target process identity was not supplied".into());
+    }
+    validate_target_creation_time(process_id, target_creation_time, creation_time)?;
     if process.wait(0)? {
         return Err(format!("process {process_id} has already exited"));
     }
@@ -1170,6 +1264,19 @@ pub fn start(
     let _ = leases.reap(unix_time_ms(), |_| true);
     println!("Lease expired; releasing the power request.");
     active_lease.finish(ReleaseReason::TtlExpired)?;
+    Ok(())
+}
+
+fn validate_target_creation_time(
+    process_id: u32,
+    expected_creation_time: Option<u64>,
+    actual_creation_time: u64,
+) -> Result<(), String> {
+    if expected_creation_time.is_some_and(|expected| expected != actual_creation_time) {
+        return Err(format!(
+            "target process {process_id} changed before the detached lease started"
+        ));
+    }
     Ok(())
 }
 
@@ -1973,6 +2080,31 @@ mod windows_safety_tests {
     fn current_process_context_can_be_verified() {
         let process_id = unsafe { GetCurrentProcessId() };
         assert!(ProcessHandle::open(process_id).is_ok());
+    }
+
+    #[test]
+    fn detached_target_creation_identity_must_match() {
+        assert!(validate_target_creation_time(12, Some(34), 34).is_ok());
+        assert!(validate_target_creation_time(12, None, 34).is_ok());
+        assert!(validate_target_creation_time(12, Some(33), 34).is_err());
+    }
+
+    #[test]
+    fn automatic_reconnect_monitor_lease_is_singleton_and_released_cleanly() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = format!(
+            "Local\\AgentGuardian.AutoReconnect.Test.{}",
+            LeaseId::new_v4()
+        );
+        let wide_name = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+
+        let lease = AutoReconnectMonitorLease::create_named(&wide_name, &sid).unwrap();
+        assert!(AutoReconnectMonitorLease::create_named(&wide_name, &sid).is_err());
+        drop(lease);
+        assert!(AutoReconnectMonitorLease::create_named(&wide_name, &sid).is_ok());
     }
 }
 

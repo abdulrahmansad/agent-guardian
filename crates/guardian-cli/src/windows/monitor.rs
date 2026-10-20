@@ -155,13 +155,15 @@ pub(super) fn run(
 ) -> Result<(), String> {
     let started = Instant::now();
     let deadline = started + Duration::from_secs(u64::from(duration_minutes) * 60);
+    let _auto_reconnect_lease = auto_reconnect_saved_wifi
+        .then(super::acquire_auto_reconnect_monitor_lease)
+        .transpose()?;
     let interval = Duration::from_secs(u64::from(interval_seconds));
     let poll_interval = if auto_reconnect_saved_wifi {
         interval.min(AUTO_RECOVERY_INTERVAL)
     } else {
         interval
     };
-    let mut next_poll = started + poll_interval;
     let guardian_process = guardian_pid
         .map(ProcessHandle::open)
         .transpose()?
@@ -170,17 +172,33 @@ pub(super) fn run(
     let stop_event = StopEvent::create()?;
     let (mut notifications, receiver) = NetworkChangeNotifications::register()?;
     let console_handler = ConsoleHandler::install()?;
-    let mut observation = observe_local_network(auto_reconnect_saved_wifi)?;
+    let mut observation = unknown_observation();
+    let mut snapshot_retry = SnapshotRetrySchedule::new();
+    let mut next_poll = started + poll_interval;
+    let initial_snapshot_fresh = match observe_local_network(auto_reconnect_saved_wifi) {
+        Ok(initial) => {
+            observation = initial;
+            snapshot_retry.record_success();
+            if json {
+                print_record(
+                    "snapshot",
+                    Some("initial"),
+                    duration_minutes,
+                    Some(&observation),
+                )?;
+            }
+            true
+        }
+        Err(_) => {
+            let retry_after = snapshot_retry.record_failure(0);
+            next_poll = started + retry_after;
+            report_snapshot_unavailable(json, "initial", retry_after);
+            false
+        }
+    };
     let mut reconnect_schedule = AutoReconnectSchedule::new();
     super::signal_startup_event(startup_event)?;
-    if json {
-        print_record(
-            "snapshot",
-            Some("initial"),
-            duration_minutes,
-            Some(&observation),
-        )?;
-    } else {
+    if !json {
         println!(
             "Monitoring local IP-interface and route changes for up to {duration_minutes} minute(s)."
         );
@@ -197,16 +215,20 @@ pub(super) fn run(
             );
         }
         println!("Press Ctrl+C to stop.");
-        print_human_observation(&observation, "Initial local snapshot");
+        if initial_snapshot_fresh {
+            print_human_observation(&observation, "Initial local snapshot");
+        }
     }
-    maybe_auto_reconnect(
-        &observation,
-        auto_reconnect_saved_wifi,
-        &mut reconnect_schedule,
-        started,
-        &config,
-        json,
-    );
+    if initial_snapshot_fresh {
+        maybe_auto_reconnect(
+            &observation,
+            auto_reconnect_saved_wifi,
+            &mut reconnect_schedule,
+            started,
+            &config,
+            json,
+        );
+    }
 
     loop {
         if STOP_REQUESTED.load(Ordering::Acquire) || stop_event.is_signaled()? {
@@ -241,43 +263,63 @@ pub(super) fn run(
                 if STOP_REQUESTED.load(Ordering::Acquire) {
                     break;
                 }
-                refresh_observation(
+                match refresh_with_backoff(
                     &mut observation,
+                    &mut snapshot_retry,
                     json,
                     "notification",
                     duration_minutes,
                     auto_reconnect_saved_wifi,
-                )?;
-                maybe_auto_reconnect(
-                    &observation,
-                    auto_reconnect_saved_wifi,
-                    &mut reconnect_schedule,
                     started,
-                    &config,
-                    json,
-                );
-            }
-            Err(RecvTimeoutError::Timeout) => {
-                if Instant::now() >= deadline {
-                    break;
-                }
-                if Instant::now() >= next_poll {
-                    refresh_observation(
-                        &mut observation,
-                        json,
-                        "periodic_refresh",
-                        duration_minutes,
-                        auto_reconnect_saved_wifi,
-                    )?;
-                    maybe_auto_reconnect(
+                )? {
+                    SnapshotRefresh::Fresh => maybe_auto_reconnect(
                         &observation,
                         auto_reconnect_saved_wifi,
                         &mut reconnect_schedule,
                         started,
                         &config,
                         json,
-                    );
-                    next_poll = Instant::now() + poll_interval;
+                    ),
+                    SnapshotRefresh::Unavailable(retry_after) => {
+                        reconnect_schedule.reset_disconnection_context();
+                        next_poll = Instant::now() + retry_after;
+                    }
+                    SnapshotRefresh::Deferred => {}
+                }
+            }
+            Err(RecvTimeoutError::Timeout) => {
+                if Instant::now() >= deadline {
+                    break;
+                }
+                if Instant::now() >= next_poll {
+                    match refresh_with_backoff(
+                        &mut observation,
+                        &mut snapshot_retry,
+                        json,
+                        "periodic_refresh",
+                        duration_minutes,
+                        auto_reconnect_saved_wifi,
+                        started,
+                    )? {
+                        SnapshotRefresh::Fresh => {
+                            maybe_auto_reconnect(
+                                &observation,
+                                auto_reconnect_saved_wifi,
+                                &mut reconnect_schedule,
+                                started,
+                                &config,
+                                json,
+                            );
+                            next_poll = Instant::now() + poll_interval;
+                        }
+                        SnapshotRefresh::Unavailable(retry_after) => {
+                            reconnect_schedule.reset_disconnection_context();
+                            next_poll = Instant::now() + retry_after;
+                        }
+                        SnapshotRefresh::Deferred => {
+                            next_poll = Instant::now() + Duration::from_secs(1);
+                        }
+                    }
                 }
             }
             Err(RecvTimeoutError::Disconnected) => break,
@@ -307,6 +349,36 @@ struct AutoReconnectSchedule {
     consecutive_failures: u8,
     awaiting_network_change: bool,
     backoff: RetryBackoff,
+}
+
+struct SnapshotRetrySchedule {
+    backoff: RetryBackoff,
+}
+
+impl SnapshotRetrySchedule {
+    fn new() -> Self {
+        Self {
+            backoff: RetryBackoff::new(1_000, 30_000),
+        }
+    }
+
+    fn is_ready(&self, now_ms: u64) -> bool {
+        self.backoff.is_ready(now_ms)
+    }
+
+    fn record_failure(&mut self, now_ms: u64) -> Duration {
+        Duration::from_millis(self.backoff.record_failure(now_ms))
+    }
+
+    fn record_success(&mut self) {
+        self.backoff.record_success();
+    }
+}
+
+enum SnapshotRefresh {
+    Fresh,
+    Unavailable(Duration),
+    Deferred,
 }
 
 impl AutoReconnectSchedule {
@@ -347,6 +419,11 @@ impl AutoReconnectSchedule {
             self.consecutive_failures = self.consecutive_failures.saturating_add(1);
             self.backoff.record_failure(now_ms);
         }
+    }
+
+    fn reset_disconnection_context(&mut self) {
+        self.disconnected_since_ms = None;
+        self.awaiting_network_change = false;
     }
 }
 
@@ -411,14 +488,87 @@ fn observe_local_network(capture_connected_profile: bool) -> Result<NetworkObser
     })
 }
 
+fn unknown_observation() -> NetworkObservation {
+    NetworkObservation {
+        summary: guardian_core::LocalNetworkSummary::default(),
+        default_route_present: None,
+        connected_profile_available: false,
+        connected_profile_hint: None,
+    }
+}
+
+fn refresh_with_backoff(
+    previous: &mut NetworkObservation,
+    retry: &mut SnapshotRetrySchedule,
+    json: bool,
+    source: &'static str,
+    duration_minutes: u32,
+    capture_connected_profile: bool,
+    started: Instant,
+) -> Result<SnapshotRefresh, String> {
+    let now_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+    if !retry.is_ready(now_ms) {
+        return Ok(SnapshotRefresh::Deferred);
+    }
+    match refresh_observation(
+        previous,
+        json,
+        source,
+        duration_minutes,
+        capture_connected_profile,
+    ) {
+        Ok(()) => {
+            retry.record_success();
+            Ok(SnapshotRefresh::Fresh)
+        }
+        Err(ObservationRefreshError::Unavailable) => {
+            let retry_after = retry.record_failure(now_ms);
+            report_snapshot_unavailable(json, source, retry_after);
+            Ok(SnapshotRefresh::Unavailable(retry_after))
+        }
+        Err(ObservationRefreshError::Output(error)) => Err(error),
+    }
+}
+
+fn report_snapshot_unavailable(json: bool, source: &'static str, retry_after: Duration) {
+    let retry_after_ms = retry_after.as_millis().min(u64::MAX as u128) as u64;
+    if json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "event": "snapshot_unavailable",
+                "source": source,
+                "retry_after_ms": retry_after_ms,
+            })
+        );
+    } else {
+        eprintln!(
+            "Local network snapshot unavailable; retrying in {} second(s).",
+            retry_after.as_secs()
+        );
+    }
+}
+
 fn refresh_observation(
     previous: &mut NetworkObservation,
     json: bool,
     source: &'static str,
     duration_minutes: u32,
     capture_connected_profile: bool,
-) -> Result<(), String> {
-    let mut current = observe_local_network(capture_connected_profile)?;
+) -> Result<(), ObservationRefreshError> {
+    refresh_observation_with(previous, json, source, duration_minutes, || {
+        observe_local_network(capture_connected_profile)
+    })
+}
+
+fn refresh_observation_with(
+    previous: &mut NetworkObservation,
+    json: bool,
+    source: &'static str,
+    duration_minutes: u32,
+    observe: impl FnOnce() -> Result<NetworkObservation, String>,
+) -> Result<(), ObservationRefreshError> {
+    let mut current = observe().map_err(|_| ObservationRefreshError::Unavailable)?;
     if !current.summary.wifi_adapter_operational {
         current.connected_profile_hint = previous.connected_profile_hint.clone();
         current.connected_profile_available = previous.connected_profile_available;
@@ -428,11 +578,17 @@ fn refresh_observation(
     }
     *previous = current;
     if json {
-        print_record("changed", Some(source), duration_minutes, Some(previous))?;
+        print_record("changed", Some(source), duration_minutes, Some(previous))
+            .map_err(ObservationRefreshError::Output)?;
     } else {
         print_human_observation(previous, "Local network metadata changed");
     }
     Ok(())
+}
+
+enum ObservationRefreshError {
+    Unavailable,
+    Output(String),
 }
 
 fn observation_changed(previous: &NetworkObservation, current: &NetworkObservation) -> bool {
@@ -573,6 +729,73 @@ mod tests {
         };
         assert!(!observation_changed(&observation, &same));
         assert!(observation_changed(&observation, &changed));
+    }
+
+    #[test]
+    fn snapshot_failures_use_bounded_backoff_and_success_resets_it() {
+        let mut retry = SnapshotRetrySchedule::new();
+        assert!(retry.is_ready(0));
+        assert_eq!(retry.record_failure(0), Duration::from_secs(1));
+        assert!(!retry.is_ready(999));
+        assert!(retry.is_ready(1_000));
+        assert_eq!(retry.record_failure(1_000), Duration::from_secs(2));
+        assert_eq!(retry.record_failure(3_000), Duration::from_secs(4));
+        assert_eq!(retry.record_failure(7_000), Duration::from_secs(8));
+        assert_eq!(retry.record_failure(15_000), Duration::from_secs(16));
+        assert_eq!(retry.record_failure(31_000), Duration::from_secs(30));
+        assert_eq!(retry.record_failure(61_000), Duration::from_secs(30));
+        retry.record_success();
+        assert!(retry.is_ready(61_000));
+        assert_eq!(retry.record_failure(61_000), Duration::from_secs(1));
+    }
+
+    #[test]
+    fn failed_snapshot_preserves_last_observation_and_discards_raw_error() {
+        let mut previous = NetworkObservation {
+            summary: LocalNetworkSummary {
+                wifi_adapters_detected: true,
+                operational_adapter_count: 0,
+                ..LocalNetworkSummary::default()
+            },
+            default_route_present: Some(false),
+            connected_profile_available: false,
+            connected_profile_hint: None,
+        };
+        let before = previous.clone();
+        let result = refresh_observation_with(&mut previous, false, "notification", 5, || {
+            Err("untrusted Windows detail and adapter identifier".into())
+        });
+
+        assert!(matches!(result, Err(ObservationRefreshError::Unavailable)));
+        assert_eq!(previous, before);
+    }
+
+    #[test]
+    fn unknown_snapshot_is_not_classified_as_wifi_disconnection() {
+        let observation = unknown_observation();
+        let mut schedule = AutoReconnectSchedule::new();
+        assert!(!schedule.should_attempt(&observation, AUTO_RECOVERY_GRACE + 1));
+    }
+
+    #[test]
+    fn snapshot_gap_restarts_disconnection_grace_without_resetting_failure_backoff() {
+        let disconnected = NetworkObservation {
+            summary: LocalNetworkSummary {
+                wifi_adapters_detected: true,
+                operational_adapter_count: 0,
+                ..LocalNetworkSummary::default()
+            },
+            default_route_present: Some(false),
+            connected_profile_available: false,
+            connected_profile_hint: None,
+        };
+        let mut schedule = AutoReconnectSchedule::new();
+        assert!(!schedule.should_attempt(&disconnected, 0));
+        assert!(schedule.should_attempt(&disconnected, AUTO_RECOVERY_GRACE));
+        schedule.record_result(Some(false), AUTO_RECOVERY_GRACE);
+        schedule.reset_disconnection_context();
+        assert!(!schedule.should_attempt(&disconnected, AUTO_RECOVERY_GRACE + 30_000));
+        assert!(schedule.should_attempt(&disconnected, AUTO_RECOVERY_GRACE + 40_000));
     }
 
     #[test]

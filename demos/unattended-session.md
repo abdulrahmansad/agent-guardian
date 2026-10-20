@@ -14,4 +14,4 @@ The doctor command reports the power capabilities and any diagnostics Windows al
 
 To demonstrate the power lease, a person must explicitly choose a bounded duration and understand that Windows may honor the request to prevent idle sleep. The foreground command can be stopped with Ctrl+C. The lease does not keep the display awake and does not override explicit Sleep, Shutdown, lid policy, or critical-battery behavior. Do not present this as verified until the acceptance matrix's hardware scenarios have been performed.
 
-Do not use `guardian network --probe` in a recorded demo unless the operator has reviewed the two fixed web checks and the possible DNS and gateway ICMP traffic. Do not demonstrate adapter recovery: no recovery executor is implemented.
+Do not use `guardian network --probe` in a recorded demo unless the operator has reviewed the two fixed web checks and the possible DNS and gateway ICMP traffic. Keep this walkthrough read-only. An explicitly enabled saved-profile reconnect path exists, but a live test did not show Guardian initiating recovery; its classifier fix still needs a live retest. Adapter restart is not implemented.

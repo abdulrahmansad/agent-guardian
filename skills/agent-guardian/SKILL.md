@@ -1,7 +1,7 @@
 ---
 name: agent-guardian
 description: Protect long-running coding tasks and unattended development on Windows when a user is leaving their computer, wants to prevent idle sleep, protect a Windows agent session, or asks for connectivity resilience or recovery from transient network failures.
-compatibility: Windows 10 or 11 for the Guardian runtime; runtime and hardware support are still under development.
+compatibility: Windows 11 x64 development host; Windows 10 and ARM64 compatibility are not verified.
 license: MIT
 ---
 
@@ -17,7 +17,7 @@ The Agent Skill and Guardian runtime are separate. Installing this skill does no
 
 Only start a Guardian lease when the user asks to protect an unattended task or approves the lease. Run guardian doctor first. Prefer AC power. Use `guardian start --background --ttl-minutes <MINUTES>` to keep the bounded lease running independently of the invoking terminal. Add `--pid <PID>` when the target process is known; Guardian accepts only processes owned by the same Windows user and running in Guardian's session. State the selected process and expiry. The display is allowed to turn off. Tell the user they can run `guardian stop` from the same Windows user session. The stop command confirms that a request was sent; it does not confirm lease release.
 
-Only enable automatic saved-profile reconnect when the user explicitly approves Wi-Fi changes. Use `guardian start --background --auto-reconnect-saved-wifi` for a lease-bound monitor, or `guardian monitor --auto-reconnect-saved-wifi` for a standalone bounded monitor. It waits for 10 seconds of confirmed Wi-Fi disconnection and no active default route, then attempts a saved-profile reconnect at most three times with backoff. It does not run external probes, restart adapters, or store credentials. Real hardware behavior remains untested.
+Only enable automatic saved-profile reconnect when the user explicitly approves Wi-Fi changes. Use `guardian start --background --auto-reconnect-saved-wifi` for a lease-bound monitor, or `guardian monitor --auto-reconnect-saved-wifi` for a standalone bounded monitor. Only one automatic recovery monitor runs per Windows user session. It waits for 10 seconds of confirmed Wi-Fi disconnection and no active default route, then attempts a saved-profile reconnect at most three times with backoff. Temporary local snapshot errors are redacted and retried with bounded backoff; stale observations do not trigger recovery. It does not run external probes, restart adapters, or store credentials. One live test of the previous candidate produced no Guardian reconnect attempt; an independent fallback restored Wi-Fi. The classifier fix has passed simulation and CI but still needs a live retest.
 
 Guardian cannot override a user-requested sleep, shutdown, restart, critical battery behavior, or Windows policy. Do not claim that Win+L behavior or a hardware sleep model is verified unless the local diagnostics and hardware test evidence say so.
 

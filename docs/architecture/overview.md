@@ -55,12 +55,12 @@ The saved Wi-Fi recovery implementation uses the Native Wi-Fi API. It reads the 
 - **Decision:** Collect bounded evidence, classify conservatively, and pass a typed state to a side-effect-free recovery decision function. Unknown or remote-only failures never justify adapter reset.
 - **Consequences:** Local observation and policy are testable without touching a live adapter. The separate saved-profile reconnect is opt-in and is covered by deterministic mock-backend tests; live recovery remains a gated hardware test.
 
-### ADR-004: Keep saved-profile reconnection explicitly one-shot
+### ADR-004: Keep saved-profile reconnection explicitly authorized and bounded
 
 - **Status:** Accepted.
 - **Context:** Automatically reconnecting can override user intent or disturb another healthy route. A profile name is also local network metadata that should not enter logs or output. Windows Native Wi-Fi notifications include profile-name, SSID, and profile-XML fields; the documented reason field describes operation failures and does not provide a reliable intentional-disconnect signal for ordinary disconnected notifications.
-- **Decision:** Provide a separate `--reconnect-saved-wifi` command option, refuse unless local evidence confirms a disconnected Wi-Fi interface and no active route, require exactly one disconnected Native Wi-Fi interface, and try its first Windows-preferred saved profile once. Keep the profile name only in memory and do not automate this action from the monitor.
-- **Consequences:** This creates a testable native connection request without broad network mutation. It does not establish Internet access, and controlled hardware validation is still required before making reliability claims or broadening recovery. The notification payload privacy and ambiguous disconnect cause are documented in the [recovery guide](../development/network-recovery.md).
+- **Decision:** Provide a separate `--reconnect-saved-wifi` command option, refuse unless local evidence confirms a disconnected Wi-Fi interface and no active route, require exactly one disconnected Native Wi-Fi interface, and try one saved profile. Automatic mode is a separate explicit opt-in: wait for a 10-second local Wi-Fi loss with no route, use only the last connected saved profile kept in memory, cap attempts at three with backoff, and allow only one automatic monitor per user session. Do not reset adapters. Keep the profile name only in memory.
+- **Consequences:** This creates testable native connection requests without broad network mutation. It does not establish Internet access. One live test failed to show Guardian initiating recovery; the classifier correction is simulated but still needs hardware retesting. The notification payload privacy and ambiguous disconnect cause are documented in the [recovery guide](../development/network-recovery.md).
 
 ### ADR-005: Validate the user-scoped stop event before use
 

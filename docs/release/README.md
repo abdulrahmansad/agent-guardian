@@ -38,7 +38,7 @@ Do not publish the generated local package as a release artifact. An official re
 - [ ] The Agent Skills specification validator and the standard Skills CLI installation flow pass against the published repository.
 - [ ] A clean-user Windows VM completes install, upgrade, launch, and uninstall using a separately trusted checksum.
 - [ ] Power behavior passes real hardware tests for idle sleep, display-off, explicit sleep, process exit/crash, AC/battery transition, and locked session on each claimed sleep model.
-- [ ] Connectivity monitoring and any future recovery pass a controlled isolated-network test; no real adapter mutation is enabled before its separate authorization and recovery controls are reviewed.
+- [ ] Read-only connectivity monitoring and the explicitly enabled saved-profile recovery path pass controlled isolated-network tests. The prior live test did not show Guardian initiating recovery; retest the classifier fix before claiming recovery works. No adapter reset is implemented.
 - [ ] Security review, dependency scan, performance measurements, compatibility matrix, and demo evidence are current.
 - [ ] Release assets are built from the reviewed commit, checksums are verified independently, and signing/provenance decisions are documented.
 - [ ] Repository owner authorizes the exact tag, assets, and publication action.
