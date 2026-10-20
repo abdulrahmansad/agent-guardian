@@ -159,7 +159,7 @@ The initial design avoids privilege elevation and arbitrary shell commands. The 
 
 ## Uninstallation
 
-Run `guardian stop` first, then `guardian uninstall` from a different Guardian executable, such as a local development build or downloaded release file, after closing other Guardian instances. The command removes only `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe` and removes that directory only if empty. It refuses to delete the executable that is currently running. Configuration, logs, and reports under `%LOCALAPPDATA%\AgentGuardian` are preserved. Remove that directory separately only if you also want to delete Guardian's local history. Remove the Agent Skill separately using the Skills CLI's removal command for the selected agent.
+Run `guardian stop` first, then `guardian uninstall`. When launched from the installed executable, Guardian schedules a small Windows PowerShell cleanup helper to remove that executable after the command exits. From another Guardian executable, removal completes before the command returns. In either case, only `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe` is removed, and its directory is removed only if empty. Configuration, logs, and reports under `%LOCALAPPDATA%\AgentGuardian` are preserved. Remove that directory separately only if you also want to delete Guardian's local history. Remove the Agent Skill separately using the Skills CLI's removal command for the selected agent.
 
 ## Contributing
 

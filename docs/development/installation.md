@@ -34,17 +34,17 @@ Installing a newer executable uses the same command. Run the new executable from
 
 ## Remove
 
-Run `guardian stop`, close Guardian processes, then run the uninstall command from a different executable, such as a local development build or downloaded executable:
+Run `guardian stop`, then run `guardian uninstall`. From the installed executable, Guardian launches a fixed, encoded PowerShell cleanup command that waits for the current Guardian process to exit and removes only the fixed installed executable path. The command reports that removal is scheduled; verify that the executable disappears if you need confirmation. From another executable, removal is immediate:
 
 ```powershell
 & '.\guardian.exe' uninstall
 ```
 
-The command removes only `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe`, and removes the installation directory only when it is empty. It refuses to delete the executable image that is currently running, so do not launch `uninstall` from the installed copy itself. Configuration, event logs, and exported reports are preserved. The uninstall command does not use delayed reboot deletion because that Windows operation requires administrative-group membership or LocalSystem.
+The command removes only `%LOCALAPPDATA%\Programs\AgentGuardian\guardian.exe`, and removes the installation directory only when it is empty. Configuration, event logs, and exported reports are preserved. The self-removal helper is bounded to 30 seconds waiting for the calling process; if cleanup cannot complete, close Guardian processes and run uninstall again from another Guardian executable. It does not use delayed reboot deletion.
 
 ## Verification status
 
-Installer and uninstaller file operations are covered by Windows tests using disposable temporary directories, including a path with spaces and non-ASCII characters, checksum rejection, upgrade, removal, preservation of unrelated files, and protection against self-deletion. No install or uninstall was performed in the current user's profile. A clean-user VM audit, published release checksum verification, and end-to-end upgrade/removal from release artifacts remain **NOT TESTED**.
+Installer and uninstaller file operations are covered by Windows tests using disposable temporary directories, including a path with spaces and non-ASCII characters, checksum rejection, upgrade, removal, preservation of unrelated files, and protection against deleting a running image. The hosted Windows workflow exercises removal from the installed executable. Current-user install/uninstall and a clean-user VM audit remain **NOT TESTED** unless separately recorded in the acceptance matrix.
 
 ## Microsoft API references
 

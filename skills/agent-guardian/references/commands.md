@@ -26,7 +26,7 @@ The skill can be installed independently with the Skills CLI. No public runtime 
 - guardian version: print the runtime version.
 - guardian install: hash this executable and verify the copied bytes, then install or upgrade it under `%LOCALAPPDATA%\Programs\AgentGuardian`. This self-check does not verify publisher identity.
 - guardian install --sha256 DIGEST: additionally compare the executable with a digest obtained through a trusted channel. Installation makes no PATH, startup, service, configuration, or log changes and does not request elevation.
-- guardian uninstall: remove the installed executable while preserving config and logs. Run it from a different Guardian executable after closing other instances; it refuses to delete its own running image.
+- guardian uninstall: remove the installed executable while preserving config and logs. From the installed executable, removal is scheduled after the command exits; from another executable, removal is immediate. Stop Guardian workers first.
 
 The power lease exits when its target process exits, the same-user stop signal arrives, or the lease expires. The background worker survives the invoking terminal but is not a service. Battery behavior and locked-session operation still require hardware verification. See the repository configuration guide for the 64 KiB file limit and battery opt-in behavior.
 

@@ -2,7 +2,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::AsRawHandle;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use sha2::{Digest, Sha256};
@@ -66,6 +68,29 @@ pub fn uninstall(json: bool) -> Result<(), String> {
     let local_app_data = local_app_data_path()?;
     let current_executable = std::env::current_exe()
         .map_err(|error| format!("could not locate this executable: {error}"))?;
+    let destination = local_app_data
+        .join(INSTALL_SUBDIRECTORY)
+        .join(EXECUTABLE_NAME);
+    if require_optional_regular_file(&destination)
+        .map_err(|error| format!("installed executable is unsafe: {error}"))?
+        && path_eq(&current_executable, &destination)
+    {
+        schedule_self_uninstall(&local_app_data)?;
+        if json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "removed": false,
+                    "removal_scheduled": true,
+                    "installation_directory_removed": false,
+                })
+            );
+        } else {
+            println!("Guardian removal is scheduled after this command exits.");
+            println!("Configuration, logs, and reports are preserved.");
+        }
+        return Ok(());
+    }
     let outcome = uninstall_at(&local_app_data, &current_executable)?;
 
     if json {
@@ -88,6 +113,86 @@ pub fn uninstall(json: bool) -> Result<(), String> {
         println!("No per-user Guardian executable was installed.");
     }
     Ok(())
+}
+
+fn schedule_self_uninstall(local_app_data: &Path) -> Result<(), String> {
+    let (process, creation_time) =
+        super::ProcessHandle::open(unsafe { super::GetCurrentProcessId() })?;
+    drop(process);
+
+    let folder_utf16: Vec<u8> = local_app_data
+        .as_os_str()
+        .encode_wide()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+    let folder_base64 = encode_base64(&folder_utf16);
+    let script = format!(
+        "$targetPid={};$created={creation_time};$deadline=(Get-Date).AddSeconds(30);while($true){{if((Get-Date)-ge $deadline){{exit 4}};$p=Get-Process -Id $targetPid -ErrorAction SilentlyContinue;if($null -eq $p){{break}};if($p.StartTime.ToUniversalTime().ToFileTimeUtc() -ne $created){{exit 3}};Start-Sleep -Milliseconds 200}};$base=[Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('{}'));$dir=Join-Path $base '{}';$file=Join-Path $dir '{}';if(Test-Path -LiteralPath $file -PathType Leaf){{Remove-Item -LiteralPath $file -Force -ErrorAction Stop}};if(Test-Path -LiteralPath $dir -PathType Container){{try{{Remove-Item -LiteralPath $dir -Force -ErrorAction Stop}}catch{{}}}}",
+        unsafe { super::GetCurrentProcessId() },
+        folder_base64,
+        INSTALL_SUBDIRECTORY,
+        EXECUTABLE_NAME,
+    );
+    let encoded_script = encode_base64(
+        &script
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect::<Vec<_>>(),
+    );
+
+    let mut system_directory = vec![0_u16; 32_768];
+    let length = unsafe {
+        super::GetSystemDirectoryW(system_directory.as_mut_ptr(), system_directory.len() as u32)
+    } as usize;
+    if length == 0 || length >= system_directory.len() {
+        return Err("could not locate the Windows system directory for the cleanup helper".into());
+    }
+    system_directory.truncate(length);
+    let powershell = PathBuf::from(std::ffi::OsString::from_wide(&system_directory))
+        .join(r"WindowsPowerShell\v1.0\powershell.exe");
+    if !powershell.is_file() {
+        return Err("Windows PowerShell is unavailable; Guardian was not removed".into());
+    }
+    Command::new(powershell)
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
+            "-EncodedCommand",
+            &encoded_script,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0000_0008 | 0x0800_0000)
+        .spawn()
+        .map_err(|error| format!("could not start the self-removal helper: {error}"))?;
+    Ok(())
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        encoded.push(ALPHABET[(first >> 2) as usize] as char);
+        encoded.push(ALPHABET[(((first & 0x03) << 4) | (second >> 4)) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[(((second & 0x0f) << 2) | (third >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(third & 0x3f) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -523,6 +628,14 @@ mod tests {
 
     fn digest(bytes: &[u8]) -> [u8; 32] {
         Sha256::digest(bytes).into()
+    }
+
+    #[test]
+    fn base64_encoder_matches_standard_vectors() {
+        assert_eq!(encode_base64(b""), "");
+        assert_eq!(encode_base64(b"f"), "Zg==");
+        assert_eq!(encode_base64(b"fo"), "Zm8=");
+        assert_eq!(encode_base64(b"foo"), "Zm9v");
     }
 
     #[test]
