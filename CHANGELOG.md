@@ -4,6 +4,9 @@ This project follows Semantic Versioning once public releases begin. Unreleased 
 
 ## Unreleased
 
+- Fixed the one-shot `guardian network --reconnect-saved-wifi` path, which incorrectly passed no profile hint into the automatic-recovery gate and could never request a connection. It now uses the first Windows-preferred saved profile after authorization, confirmed Wi-Fi disconnection, no default route, and a single disconnected wireless interface.
+- Fixed live probe DNS evidence: the synchronous `GetAddrInfoExW` timeout call returned `WSAEINVAL`, leaving both DNS signals unknown and a healthy network `SUSPECT`. Each lookup now runs in a worker thread with a bounded wait and uses `GetAddrInfoW`.
+- Verified a controlled Windows 11 x64 Wi-Fi recovery: the monitor captured the connected saved-profile hint, detected the disconnect, recorded a confirmed association, and restored the default route and independent DNS/TCP connectivity before the fallback. This remains one device/network result.
 - Redacted all `powercfg /requests` command output, followed and validated the Windows adapter linked list, and restricted PID-bound power leases to processes owned by the same user and session.
 - Added a per-user Windows runtime install and upgrade command that verifies a supplied SHA-256 and stages the executable in `%LOCALAPPDATA%` without elevation, PATH changes, startup registration, or service installation.
 - Added an uninstall command that removes only the Guardian executable and preserves configuration and logs. It refuses to remove the currently running executable.

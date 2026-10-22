@@ -71,7 +71,22 @@ trait RecoveryBackend {
 /// Attempt one saved-profile reconnect only after the explicit CLI authorization and local
 /// evidence both select the non-destructive reconnect action.
 pub(super) fn attempt(summary: &LocalNetworkSummary, authorized: bool) -> RecoveryReport {
-    attempt_with_profile_hint(summary, authorized, None)
+    if !authorized {
+        return RecoveryReport::blocked("authorization_required");
+    }
+    if classify_local_observation(summary, &[], false) != ConnectivityState::WifiDisconnected {
+        return RecoveryReport::blocked("wifi_disconnect_not_confirmed");
+    }
+    let mut backend = match NativeWifiBackend::open() {
+        Ok(backend) => backend,
+        Err(code) => {
+            return RecoveryReport {
+                windows_error: Some(code),
+                ..RecoveryReport::blocked("wlan_api_unavailable")
+            };
+        }
+    };
+    run_with_backend_and_profile_hint(summary, true, None, &mut backend)
 }
 
 /// Recover the profile that was active when the monitor last observed a connected WLAN.
@@ -650,6 +665,18 @@ mod tests {
         assert_eq!(report.disposition, "authorization_required");
         assert_eq!(backend.read_calls, 0);
         assert_eq!(backend.connect_requests, 0);
+    }
+
+    #[test]
+    fn manual_attempt_requires_authorization_and_confirmed_disconnect() {
+        let report = attempt(&disconnected_summary(), false);
+        assert_eq!(report.disposition, "authorization_required");
+
+        let mut connected = disconnected_summary();
+        connected.wifi_adapter_operational = true;
+        connected.operational_adapter_count = 1;
+        let report = attempt(&connected, true);
+        assert_eq!(report.disposition, "wifi_disconnect_not_confirmed");
     }
 
     #[test]
