@@ -143,4 +143,4 @@ This is the source-of-truth checklist for the Agent Guardian master goal. Automa
 
 ## Next concrete action
 
-Update PR #1 with the 2026-10-22 repeat Wi-Fi and 17-minute idle-window power evidence, then complete the clean-user VM and remaining physical power checks when those environments are available. The Wi-Fi recovery tests passed on one Windows 11 x64 device and network; do not generalize that result. Keep saved-profile reconnect explicitly opt-in and adapter restarts disabled; display-off, locked-session, and elevated power-request cleanup remain **NOT TESTED**.
+PR #1 now records the 2026-10-22 repeat Wi-Fi, 17-minute idle-window power, and post-release sleep evidence. Complete the clean-user VM and remaining physical power checks when those environments are available. The Wi-Fi recovery tests passed on one Windows 11 x64 device and network; do not generalize that result. Keep saved-profile reconnect explicitly opt-in and adapter restarts disabled; display-off, locked-session, and elevated power-request cleanup remain **NOT TESTED**.
