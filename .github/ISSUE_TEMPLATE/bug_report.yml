@@ -5,7 +5,9 @@ labels: [bug]
 body:
   - type: markdown
     attributes:
-      value: Do not include passwords, tokens, Wi-Fi credentials, or private logs.
+      value: >-
+        Do not include passwords, tokens, Wi-Fi credentials, or private logs. Report suspected vulnerabilities privately using
+        [SECURITY.md](https://github.com/abdulrahmansad/agent-guardian/blob/main/SECURITY.md), not a public issue.
   - type: input
     id: version
     attributes:

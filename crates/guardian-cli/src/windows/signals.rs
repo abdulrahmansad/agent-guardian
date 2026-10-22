@@ -1,6 +1,8 @@
 use std::ffi::c_void;
 use std::mem::size_of;
 use std::ptr;
+use std::sync::mpsc;
+use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, HANDLE};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
@@ -10,13 +12,12 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::{
-    ADDRINFOEXW, AF_INET, AF_INET6, AF_UNSPEC, FreeAddrInfoExW, GetAddrInfoExW, IN_ADDR, IN_ADDR_0,
-    IN6_ADDR, IN6_ADDR_0, INADDR_ANY, NS_DNS, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0,
-    SOCKADDR_INET, TIMEVAL, WSACleanup, WSADATA, WSAHOST_NOT_FOUND, WSANO_DATA, WSAStartup,
-    WSATRY_AGAIN,
+    ADDRINFOW, AF_INET, AF_INET6, AF_UNSPEC, FreeAddrInfoW, GetAddrInfoW, IN_ADDR, IN_ADDR_0,
+    IN6_ADDR, IN6_ADDR_0, INADDR_ANY, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_IN6_0, SOCKADDR_INET,
+    WSACleanup, WSADATA, WSAHOST_NOT_FOUND, WSANO_DATA, WSAStartup, WSATRY_AGAIN,
 };
 
-const DNS_TIMEOUT_MS: i32 = 2_000;
+const DNS_TIMEOUT: Duration = Duration::from_millis(2_000);
 const GATEWAY_ECHO_TIMEOUT_MS: u32 = 750;
 const GATEWAY_ECHO_PAYLOAD: [u8; 1] = [0x41];
 const IPV4_ROUTE_TEST_ADDRESS: [u8; 4] = [1, 1, 1, 1];
@@ -73,39 +74,29 @@ impl Drop for WinsockSession {
 }
 
 fn resolve_fixed_hosts() -> (bool, Option<bool>, Option<bool>) {
-    let Some(_winsock) = WinsockSession::start() else {
-        return (false, None, None);
-    };
-    let timeout = TIMEVAL {
-        tv_sec: DNS_TIMEOUT_MS / 1_000,
-        tv_usec: 0,
-    };
     let microsoft_name = wide("www.msftconnecttest.com");
     let independent_name = wide("www.cloudflare.com");
-    let microsoft = resolve_dns_name(&microsoft_name, &timeout);
-    let independent = resolve_dns_name(&independent_name, &timeout);
+    let microsoft = resolve_dns_name(&microsoft_name);
+    let independent = resolve_dns_name(&independent_name);
     (true, microsoft, independent)
 }
 
-fn resolve_dns_name(name: &[u16], timeout: &TIMEVAL) -> Option<bool> {
-    let mut results: *mut ADDRINFOEXW = ptr::null_mut();
-    let result = unsafe {
-        GetAddrInfoExW(
-            name.as_ptr(),
-            ptr::null(),
-            NS_DNS,
-            ptr::null(),
-            ptr::null(),
-            &mut results,
-            timeout,
-            ptr::null(),
-            None,
-            ptr::null_mut(),
-        )
-    };
+fn resolve_dns_name(name: &[u16]) -> Option<bool> {
+    let name = name.to_vec();
+    let (sender, receiver) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = sender.send(query_dns_name(&name));
+    });
+    receiver.recv_timeout(DNS_TIMEOUT).ok().flatten()
+}
+
+fn query_dns_name(name: &[u16]) -> Option<bool> {
+    let _winsock = WinsockSession::start()?;
+    let mut results: *mut ADDRINFOW = ptr::null_mut();
+    let result = unsafe { GetAddrInfoW(name.as_ptr(), ptr::null(), ptr::null(), &mut results) };
     if result == 0 {
         if !results.is_null() {
-            unsafe { FreeAddrInfoExW(results) };
+            unsafe { FreeAddrInfoW(results) };
             Some(true)
         } else {
             None

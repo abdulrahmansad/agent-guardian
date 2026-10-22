@@ -201,6 +201,7 @@ fn release_summary(reason: ReleaseReason) -> &'static str {
         ReleaseReason::BatteryTransition => "Battery transition ended the power lease",
         ReleaseReason::RuntimeError => "Runtime error ended the power lease",
         ReleaseReason::RuntimeExit => "Guardian runtime exited; power request released",
+        ReleaseReason::UserRequestedStop => "User requested stop; power request released",
     }
 }
 

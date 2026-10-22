@@ -15,7 +15,7 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
           persist-credentials: false
 
@@ -24,6 +24,17 @@ jobs:
         run: |
           rustup toolchain install stable-x86_64-pc-windows-msvc --profile minimal --component rustfmt --component clippy
           rustup default stable-x86_64-pc-windows-msvc
+
+      - name: Check out previous Windows candidate for upgrade smoke test
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
+        with:
+          ref: 68535d9c725ddd46e7e850e4868b8e2c8ca0d66e
+          path: previous-source
+          persist-credentials: false
+
+      - name: Build previous Windows candidate
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+        working-directory: previous-source
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -39,6 +50,140 @@ jobs:
 
       - name: Validate local runtime packaging
         run: python scripts/package_release.py --binary target/x86_64-pc-windows-msvc/release/guardian.exe --output-dir dist
+
+      - name: Smoke-test Windows executable
+        shell: pwsh
+        run: |
+          $version = & .\target\x86_64-pc-windows-msvc\release\guardian.exe --version
+          if ($LASTEXITCODE -ne 0) { throw "Guardian executable exited with code $LASTEXITCODE" }
+          if ($version.Trim() -ne 'guardian 0.1.0') { throw "Unexpected Guardian version output: $version" }
+
+      - name: Test per-user install, upgrade, and removal on runner
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path '.\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
+          $previous = (Resolve-Path '.\previous-source\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
+          $checksum = (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant()
+          $previousChecksum = (Get-FileHash -LiteralPath $previous -Algorithm SHA256).Hash.ToLowerInvariant()
+          $installed = Join-Path $env:LOCALAPPDATA 'Programs\AgentGuardian\guardian.exe'
+          if (Test-Path -LiteralPath $installed) { throw 'Expected a clean per-user Guardian install path on the hosted runner' }
+          try {
+            & $previous install --sha256 $previousChecksum
+            if ($LASTEXITCODE -ne 0) { throw "Previous Guardian candidate install exited with code $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'Guardian install did not create the per-user executable' }
+
+            $installedHash = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedHash -ne $previousChecksum) { throw 'Previous Guardian candidate was not installed byte-for-byte' }
+
+            & $source install --sha256 $checksum
+            if ($LASTEXITCODE -ne 0) { throw "Guardian candidate upgrade exited with code $LASTEXITCODE" }
+            $installedHash = (Get-FileHash -LiteralPath $installed -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($installedHash -ne $checksum) { throw 'Guardian candidate upgrade did not replace the installed executable' }
+
+            $installedVersion = & $installed --version
+            if ($LASTEXITCODE -ne 0) { throw "Upgraded Guardian exited with code $LASTEXITCODE" }
+            if ($installedVersion.Trim() -ne 'guardian 0.1.0') { throw "Unexpected upgraded Guardian version output: $installedVersion" }
+          }
+          finally {
+            & $source uninstall
+            if ($LASTEXITCODE -ne 0) { throw "Guardian uninstall exited with code $LASTEXITCODE" }
+            if (Test-Path -LiteralPath $installed) { throw 'Guardian uninstall left the per-user executable behind' }
+          }
+
+          try {
+            & $source install
+            if ($LASTEXITCODE -ne 0) { throw "Self-hash Guardian install exited with code $LASTEXITCODE" }
+            if (-not (Test-Path -LiteralPath $installed -PathType Leaf)) { throw 'Self-hash Guardian install did not create the per-user executable' }
+            & $installed --version
+            if ($LASTEXITCODE -ne 0) { throw 'Self-hash installed Guardian did not launch' }
+          }
+          finally {
+            & $source uninstall
+            if ($LASTEXITCODE -ne 0) { throw "Self-hash Guardian uninstall exited with code $LASTEXITCODE" }
+            if (Test-Path -LiteralPath $installed) { throw 'Self-hash Guardian uninstall left the per-user executable behind' }
+          }
+
+      - name: Test detached power lease start and stop
+        shell: pwsh
+        run: |
+          $source = (Resolve-Path '.\target\x86_64-pc-windows-msvc\release\guardian.exe').Path
+          $token = [Guid]::NewGuid().ToString('N')
+          $stdout = Join-Path $env:RUNNER_TEMP "guardian-start-$token.out"
+          $stderr = Join-Path $env:RUNNER_TEMP "guardian-start-$token.err"
+          $workerId = $null
+          try {
+            $launcher = Start-Process -FilePath $source -ArgumentList @('start', '--background', '--allow-battery', '--auto-reconnect-saved-wifi', '--ttl-minutes', '1') -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+            if (-not $launcher.WaitForExit(20000)) { throw 'Guardian background launcher did not confirm readiness within the bounded startup window' }
+            $output = Get-Content -LiteralPath $stdout -Raw
+            $match = [regex]::Match($output, 'process (\d+)')
+            if (-not $match.Success) { throw "Guardian did not report its worker process: $output" }
+            $workerId = [int]$match.Groups[1].Value
+
+            $running = $false
+            for ($i = 0; $i -lt 10; $i++) {
+              if (Get-Process -Id $workerId -ErrorAction SilentlyContinue) { $running = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $running) { throw 'Guardian background worker exited before acquiring its bounded lease' }
+
+            $monitorId = $null
+            for ($i = 0; $i -lt 10; $i++) {
+              $monitor = Get-CimInstance Win32_Process -Filter "Name = 'guardian.exe'" | Where-Object { $_.CommandLine -like '*--guardian-pid*' -and $_.CommandLine -like "*$workerId*" } | Select-Object -First 1
+              if ($monitor) { $monitorId = [int]$monitor.ProcessId; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $monitorId) { throw 'Guardian did not start the lease-bound Wi-Fi monitor' }
+
+            & $source stop
+            if ($LASTEXITCODE -ne 0) { throw 'Guardian stop command failed' }
+            $stopped = $false
+            for ($i = 0; $i -lt 15; $i++) {
+              if (-not (Get-Process -Id $workerId -ErrorAction SilentlyContinue)) { $stopped = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $stopped) { throw 'Guardian background worker did not exit after the stop signal' }
+            $monitorStopped = $false
+            for ($i = 0; $i -lt 15; $i++) {
+              if (-not (Get-Process -Id $monitorId -ErrorAction SilentlyContinue)) { $monitorStopped = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $monitorStopped) { throw 'Guardian Wi-Fi monitor did not exit after its owning lease stopped' }
+          }
+          finally {
+            if ($workerId -and (Get-Process -Id $workerId -ErrorAction SilentlyContinue)) { & $source stop | Out-Null }
+            Remove-Item -LiteralPath $stdout, $stderr -Force -ErrorAction SilentlyContinue
+          }
+
+          $expiryToken = [Guid]::NewGuid().ToString('N')
+          $expiryStdout = Join-Path $env:RUNNER_TEMP "guardian-expiry-$expiryToken.out"
+          $expiryStderr = Join-Path $env:RUNNER_TEMP "guardian-expiry-$expiryToken.err"
+          $expiryWorkerId = $null
+          try {
+            $expiryLauncher = Start-Process -FilePath $source -ArgumentList @('start', '--background', '--allow-battery', '--ttl-minutes', '1') -PassThru -WindowStyle Hidden -RedirectStandardOutput $expiryStdout -RedirectStandardError $expiryStderr
+            if (-not $expiryLauncher.WaitForExit(20000)) { throw 'Guardian expiry launcher did not confirm readiness within the bounded startup window' }
+            $expiryOutput = Get-Content -LiteralPath $expiryStdout -Raw
+            $expiryMatch = [regex]::Match($expiryOutput, 'process (\d+)')
+            if (-not $expiryMatch.Success) { throw "Guardian did not report its expiring worker process: $expiryOutput" }
+            $expiryWorkerId = [int]$expiryMatch.Groups[1].Value
+
+            $running = $false
+            for ($i = 0; $i -lt 10; $i++) {
+              if (Get-Process -Id $expiryWorkerId -ErrorAction SilentlyContinue) { $running = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $running) { throw 'Guardian expiry worker exited before acquiring its bounded lease' }
+
+            $expired = $false
+            for ($i = 0; $i -lt 80; $i++) {
+              if (-not (Get-Process -Id $expiryWorkerId -ErrorAction SilentlyContinue)) { $expired = $true; break }
+              Start-Sleep -Seconds 1
+            }
+            if (-not $expired) { throw 'Guardian background worker did not exit when its one-minute lease expired' }
+          }
+          finally {
+            if ($expiryWorkerId -and (Get-Process -Id $expiryWorkerId -ErrorAction SilentlyContinue)) { & $source stop | Out-Null }
+            Remove-Item -LiteralPath $expiryStdout, $expiryStderr -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Validate Rust crate packaging
         run: cargo package --workspace --no-verify
@@ -62,15 +207,28 @@ jobs:
       - name: Scan Rust dependencies for advisories
         shell: pwsh
         run: |
-          cargo install cargo-audit --locked --version 0.22.2 --jobs 1
+          cargo install cargo-audit --locked --version 0.22.2 --debug --jobs 2
           cargo audit
+
+      - name: Upload local MSVC package for review
+        if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: agent-guardian-windows-x64-${{ github.sha }}-local
+          path: |
+            dist/agent-guardian-*-windows-x86_64-local.zip
+            dist/agent-guardian-*-windows-x86_64-local.zip.sha256
+            dist/agent-guardian-*-windows-x86_64-local.exe.sha256
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
 
   msrv:
     name: Minimum Rust version
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 (Node 24)
         with:
           persist-credentials: false
 

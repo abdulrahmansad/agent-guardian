@@ -3,8 +3,9 @@ use std::ffi::c_void;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::os::windows::ffi::OsStringExt;
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use guardian_core::{
@@ -13,6 +14,11 @@ use guardian_core::{
     PowerLeasePolicyError, PowerSourceClass, ProcessIdentity, ReleaseReason, SessionEvent,
     SessionEventKind, SessionReport, WifiReconnectResult, classify_local_evidence,
 };
+use sha2::{Digest, Sha256};
+use windows_sys::Win32::Foundation::{
+    ERROR_ALREADY_EXISTS, ERROR_FILE_NOT_FOUND, LocalFree, SetLastError, WAIT_FAILED,
+    WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_INCLUDE_GATEWAYS, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
     GAA_FLAG_SKIP_FRIENDLY_NAME, GAA_FLAG_SKIP_MULTICAST, GAA_FLAG_SKIP_UNICAST,
@@ -20,6 +26,24 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 };
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
 use windows_sys::Win32::Networking::WinSock::AF_UNSPEC;
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+    ConvertStringSidToSidW, GetSecurityInfo, SE_KERNEL_OBJECT,
+};
+use windows_sys::Win32::Security::{
+    ACCESS_ALLOWED_ACE, ACE_HEADER, ACL_SIZE_INFORMATION, AclSizeInformation,
+    DACL_SECURITY_INFORMATION, EqualSid, GetAce, GetAclInformation, GetSecurityDescriptorControl,
+    GetSecurityDescriptorDacl, GetTokenInformation, OWNER_SECURITY_INFORMATION,
+    PSECURITY_DESCRIPTOR, SE_DACL_PROTECTED, SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER,
+    TokenSessionId, TokenUser,
+};
+use windows_sys::Win32::Storage::FileSystem::READ_CONTROL;
+use windows_sys::Win32::System::SystemServices::ACCESS_ALLOWED_ACE_TYPE;
+use windows_sys::Win32::System::Threading::{
+    CREATE_EVENT_MANUAL_RESET, CREATE_MUTEX_INITIAL_OWNER, CreateEventExW, CreateMutexExW,
+    EVENT_MODIFY_STATE, GetCurrentProcess, MUTEX_MODIFY_STATE, OpenEventW, OpenProcessToken,
+    ReleaseMutex, SYNCHRONIZATION_SYNCHRONIZE, SetEvent, WaitForMultipleObjects,
+};
 
 mod install;
 mod monitor;
@@ -29,11 +53,13 @@ mod signals;
 
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
 const SYNCHRONIZE: u32 = 0x0010_0000;
-const WAIT_OBJECT_0: u32 = 0;
-const WAIT_TIMEOUT: u32 = 0x102;
+const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 const POWER_REQUEST_SYSTEM_REQUIRED: i32 = 1;
 const BATTERY_LEASE_LIMIT: Duration = Duration::from_secs(5 * 60);
+const STOP_EVENT_ACCESS: u32 = EVENT_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE | READ_CONTROL;
 const POWER_POLL_INTERVAL: Duration = Duration::from_secs(10);
+const DETACHED_PROCESS: u32 = 0x0000_0008;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const ERROR_BUFFER_OVERFLOW: u32 = 111;
 const ERROR_NO_DATA: u32 = 232;
 const NETWORK_BUFFER_START_BYTES: usize = 15 * 1024;
@@ -102,6 +128,140 @@ unsafe extern "system" {
 
 struct ProcessHandle(Handle);
 
+struct TokenHandle(Handle);
+
+impl TokenHandle {
+    fn open(process: Handle) -> Result<Self, String> {
+        let mut token = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) } == 0 {
+            return Err(format!(
+                "could not verify process owner and session (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if token.is_null() || token as isize == -1 {
+            return Err("Windows returned an invalid process token handle".into());
+        }
+        Ok(Self(token))
+    }
+
+    fn user_buffer(&self) -> Result<Vec<usize>, String> {
+        let mut required_bytes = 0;
+        let first_result = unsafe {
+            GetTokenInformation(
+                self.0,
+                TokenUser,
+                std::ptr::null_mut(),
+                0,
+                &mut required_bytes,
+            )
+        };
+        if first_result == 0
+            && (required_bytes == 0 || unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER)
+        {
+            return Err(format!(
+                "could not query process owner (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if required_bytes == 0 || required_bytes > 64 * 1024 {
+            return Err("Windows returned an invalid process-owner buffer size".into());
+        }
+        let word_count = (required_bytes as usize).div_ceil(std::mem::size_of::<usize>());
+        let mut buffer = vec![0_usize; word_count];
+        let mut returned_bytes = 0;
+        if unsafe {
+            GetTokenInformation(
+                self.0,
+                TokenUser,
+                buffer.as_mut_ptr().cast(),
+                (buffer.len() * std::mem::size_of::<usize>()) as u32,
+                &mut returned_bytes,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "could not query process owner (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if returned_bytes < std::mem::size_of::<TOKEN_USER>() as u32 {
+            return Err("Windows returned incomplete process-owner information".into());
+        }
+        Ok(buffer)
+    }
+
+    fn session_id(&self) -> Result<u32, String> {
+        let mut session_id = 0_u32;
+        let mut returned_bytes = 0;
+        if unsafe {
+            GetTokenInformation(
+                self.0,
+                TokenSessionId,
+                (&mut session_id as *mut u32).cast(),
+                std::mem::size_of::<u32>() as u32,
+                &mut returned_bytes,
+            )
+        } == 0
+        {
+            return Err(format!(
+                "could not query process session (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if returned_bytes != std::mem::size_of::<u32>() as u32 {
+            return Err("Windows returned incomplete process-session information".into());
+        }
+        Ok(session_id)
+    }
+}
+
+impl Drop for TokenHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+fn token_user_sid(buffer: &[usize]) -> Result<*mut c_void, String> {
+    let token_user = unsafe { &*(buffer.as_ptr().cast::<TOKEN_USER>()) };
+    if token_user.User.Sid.is_null() {
+        return Err("Windows returned an invalid process-owner SID".into());
+    }
+    Ok(token_user.User.Sid)
+}
+
+fn validate_process_context(
+    same_user: bool,
+    target_session_id: u32,
+    current_session_id: u32,
+) -> Result<(), String> {
+    if same_user && target_session_id == current_session_id {
+        Ok(())
+    } else {
+        Err("target process must belong to the current Windows user and session".into())
+    }
+}
+
+fn verify_process_owner_and_session(target_process: Handle) -> Result<(), String> {
+    let target_token = TokenHandle::open(target_process)?;
+    let current_token = TokenHandle::open(unsafe { GetCurrentProcess() })?;
+    let target_user = target_token.user_buffer()?;
+    let current_user = current_token.user_buffer()?;
+    let same_user = unsafe {
+        EqualSid(
+            token_user_sid(&target_user)?,
+            token_user_sid(&current_user)?,
+        ) != 0
+    };
+    validate_process_context(
+        same_user,
+        target_token.session_id()?,
+        current_token.session_id()?,
+    )
+}
+
 impl ProcessHandle {
     fn open(process_id: u32) -> Result<(Self, u64), String> {
         let handle = unsafe {
@@ -131,6 +291,7 @@ impl ProcessHandle {
             ));
         }
         let created = (u64::from(creation.high) << 32) | u64::from(creation.low);
+        verify_process_owner_and_session(process.0)?;
         Ok((process, created))
     }
 
@@ -151,6 +312,666 @@ impl Drop for ProcessHandle {
         unsafe {
             CloseHandle(self.0);
         }
+    }
+}
+
+struct LocalAllocation(*mut c_void);
+
+impl Drop for LocalAllocation {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = LocalFree(self.0);
+        }
+    }
+}
+
+fn stop_event_name_for(session_id: u32, sid: &str) -> String {
+    let digest = Sha256::digest(sid.as_bytes());
+    let suffix = digest
+        .iter()
+        .take(16)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("Local\\AgentGuardian.Stop.{session_id}.{suffix}")
+}
+
+fn stop_event_identity() -> Result<(Vec<u16>, String), String> {
+    let token = TokenHandle::open(unsafe { GetCurrentProcess() })?;
+    let session_id = token.session_id()?;
+    let user_buffer = token.user_buffer()?;
+    let sid = token_user_sid(&user_buffer)?;
+    let mut sid_string = std::ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut sid_string) } == 0 {
+        return Err(format!(
+            "could not identify the current Windows user for stop signaling (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if sid_string.is_null() {
+        return Err("Windows returned an invalid current-user identifier".into());
+    }
+    let sid_allocation = LocalAllocation(sid_string.cast());
+    let mut sid_length = 0_usize;
+    while sid_length < 192 && unsafe { *sid_string.add(sid_length) } != 0 {
+        sid_length += 1;
+    }
+    if sid_length == 0 || sid_length == 192 {
+        return Err("Windows returned an invalid current-user identifier".into());
+    }
+    let sid_text =
+        String::from_utf16(unsafe { std::slice::from_raw_parts(sid_string, sid_length) })
+            .map_err(|_| "Windows returned an invalid current-user identifier".to_string())?;
+    if !sid_text.starts_with("S-")
+        || !sid_text
+            .chars()
+            .all(|character| character == 'S' || character == '-' || character.is_ascii_digit())
+    {
+        return Err("Windows returned an invalid current-user identifier".into());
+    }
+    let _ = sid_allocation;
+    let name = stop_event_name_for(session_id, &sid_text);
+    let wide_name = name.encode_utf16().chain(std::iter::once(0)).collect();
+    Ok((wide_name, sid_text))
+}
+
+struct SecurityDescriptor(LocalAllocation);
+
+impl SecurityDescriptor {
+    fn for_user(sid: &str) -> Result<Self, String> {
+        // Set the event owner explicitly. On elevated Windows runners the
+        // token's default owner can be Administrators rather than TokenUser.
+        Self::for_user_access(sid, STOP_EVENT_ACCESS)
+    }
+
+    fn for_user_access(sid: &str, access: u32) -> Result<Self, String> {
+        let sddl = format!("O:{sid}D:P(A;;0x{access:08x};;;{sid})");
+        Self::from_sddl(&sddl)
+    }
+
+    fn from_sddl(sddl: &str) -> Result<Self, String> {
+        let wide_sddl: Vec<u16> = sddl.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let converted = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                wide_sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if converted == 0 {
+            if !descriptor.is_null() {
+                let _ = LocalAllocation(descriptor.cast());
+            }
+            return Err(format!(
+                "could not secure the Guardian stop signal (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if descriptor.is_null() {
+            return Err("Windows returned an invalid stop-signal security descriptor".into());
+        }
+        Ok(Self(LocalAllocation(descriptor)))
+    }
+}
+
+pub(super) struct AutoReconnectMonitorLease(Handle);
+
+impl AutoReconnectMonitorLease {
+    fn acquire() -> Result<Self, String> {
+        let (_, sid) = stop_event_identity()?;
+        let digest = Sha256::digest(sid.as_bytes());
+        let suffix = digest
+            .iter()
+            .take(16)
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let name = format!("Local\\AgentGuardian.AutoReconnect.{suffix}");
+        let wide_name = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+        Self::create_named(&wide_name, &sid)
+    }
+
+    fn create_named(name: &[u16], sid: &str) -> Result<Self, String> {
+        let access = MUTEX_MODIFY_STATE | SYNCHRONIZATION_SYNCHRONIZE;
+        let descriptor = SecurityDescriptor::for_user_access(sid, access)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        unsafe { SetLastError(0) };
+        let handle = unsafe {
+            CreateMutexExW(
+                &attributes,
+                name.as_ptr(),
+                CREATE_MUTEX_INITIAL_OWNER,
+                access,
+            )
+        };
+        if handle.is_null() || handle as isize == -1 {
+            return Err(format!(
+                "could not reserve the automatic Wi-Fi recovery monitor (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+            unsafe { CloseHandle(handle) };
+            return Err(
+                "an automatic Wi-Fi recovery monitor is already active in this user session".into(),
+            );
+        }
+        Ok(Self(handle))
+    }
+}
+
+impl Drop for AutoReconnectMonitorLease {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = ReleaseMutex(self.0);
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+pub(super) fn acquire_auto_reconnect_monitor_lease() -> Result<AutoReconnectMonitorLease, String> {
+    AutoReconnectMonitorLease::acquire()
+}
+
+fn sid_from_text(sid: &str) -> Result<LocalAllocation, String> {
+    let wide_sid: Vec<u16> = sid.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut binary_sid = std::ptr::null_mut();
+    if unsafe { ConvertStringSidToSidW(wide_sid.as_ptr(), &mut binary_sid) } == 0 {
+        if !binary_sid.is_null() {
+            let _ = LocalAllocation(binary_sid.cast());
+        }
+        return Err(format!(
+            "could not validate the Guardian stop signal identity (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if binary_sid.is_null() {
+        return Err("Windows returned an invalid stop-signal identity".into());
+    }
+    Ok(LocalAllocation(binary_sid.cast()))
+}
+
+fn stop_event_security_matches(handle: Handle, sid: &str) -> Result<bool, String> {
+    let expected_sid = sid_from_text(sid)?;
+    let mut owner = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    let error = unsafe {
+        GetSecurityInfo(
+            handle,
+            SE_KERNEL_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if error != 0 {
+        if !descriptor.is_null() {
+            let _ = LocalAllocation(descriptor.cast());
+        }
+        return Err(format!(
+            "could not inspect the Guardian stop signal security (Windows error {error})"
+        ));
+    }
+    if descriptor.is_null() {
+        return Err("Windows returned an invalid stop-signal security descriptor".into());
+    }
+    let _descriptor = LocalAllocation(descriptor.cast());
+    if owner.is_null() || unsafe { EqualSid(owner, expected_sid.0) } == 0 {
+        return Ok(false);
+    }
+
+    let mut control = 0_u16;
+    let mut revision = 0_u32;
+    if unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) } == 0 {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if control & SE_DACL_PROTECTED == 0 {
+        return Ok(false);
+    }
+
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut descriptor_dacl = std::ptr::null_mut();
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut descriptor_dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if dacl_present == 0 || dacl.is_null() || descriptor_dacl.is_null() {
+        return Ok(false);
+    }
+
+    let mut acl_size = ACL_SIZE_INFORMATION::default();
+    if unsafe {
+        GetAclInformation(
+            dacl,
+            (&mut acl_size as *mut ACL_SIZE_INFORMATION).cast(),
+            std::mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    if acl_size.AceCount != 1 {
+        return Ok(false);
+    }
+
+    let mut ace = std::ptr::null_mut();
+    if unsafe { GetAce(dacl, 0, &mut ace) } == 0 || ace.is_null() {
+        return Err(format!(
+            "could not inspect the Guardian stop signal ACL (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    let header = unsafe { &*(ace.cast::<ACE_HEADER>()) };
+    if header.AceType != ACCESS_ALLOWED_ACE_TYPE as u8
+        || header.AceFlags != 0
+        || usize::from(header.AceSize) < std::mem::size_of::<ACCESS_ALLOWED_ACE>()
+    {
+        return Ok(false);
+    }
+    let allowed = unsafe { &*(ace.cast::<ACCESS_ALLOWED_ACE>()) };
+    if allowed.Mask != STOP_EVENT_ACCESS {
+        return Ok(false);
+    }
+    let ace_sid = std::ptr::addr_of!(allowed.SidStart).cast_mut().cast();
+    Ok(unsafe { EqualSid(ace_sid, expected_sid.0) } != 0)
+}
+
+struct StopEvent(Handle);
+
+impl StopEvent {
+    fn create() -> Result<Self, String> {
+        let (name, sid) = stop_event_identity()?;
+        Self::create_named(&name, &sid)
+    }
+
+    fn create_named(name: &[u16], sid: &str) -> Result<Self, String> {
+        let descriptor = SecurityDescriptor::for_user(sid)?;
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        unsafe { SetLastError(0) };
+        let handle = unsafe {
+            CreateEventExW(
+                &attributes,
+                name.as_ptr(),
+                CREATE_EVENT_MANUAL_RESET,
+                STOP_EVENT_ACCESS,
+            )
+        };
+        if handle.is_null() || handle as isize == -1 {
+            return Err(format!(
+                "could not create the Guardian stop signal (Windows error {})",
+                unsafe { GetLastError() }
+            ));
+        }
+        let already_exists = unsafe { GetLastError() } == ERROR_ALREADY_EXISTS;
+        if !matches!(stop_event_security_matches(handle, sid), Ok(true)) {
+            unsafe { CloseHandle(handle) };
+            return Err(
+                "Guardian stop signal has unexpected ownership or access rules; refusing to use it"
+                    .into(),
+            );
+        }
+        if already_exists {
+            match unsafe { WaitForSingleObject(handle, 0) } {
+                WAIT_TIMEOUT => {}
+                WAIT_OBJECT_0 => {
+                    unsafe { CloseHandle(handle) };
+                    return Err(
+                        "a Guardian stop is already in progress for this user session".into(),
+                    );
+                }
+                _ => {
+                    let error = unsafe { GetLastError() };
+                    unsafe { CloseHandle(handle) };
+                    return Err(format!(
+                        "could not inspect the Guardian stop signal (Windows error {error})"
+                    ));
+                }
+            }
+        }
+        Ok(Self(handle))
+    }
+
+    fn request_stop(json: bool) -> Result<(), String> {
+        let (name, sid) = stop_event_identity()?;
+        let requested = Self::request_stop_named(&name, &sid)?;
+        if json {
+            println!("{{\"stop_requested\":{requested}}}");
+        } else if requested {
+            println!(
+                "Stop request sent to active Guardian process(es) in this user session; shutdown is not confirmed."
+            );
+        } else {
+            println!("No active Guardian process was found in this user session.");
+        }
+        Ok(())
+    }
+
+    fn is_signaled(&self) -> Result<bool, String> {
+        match unsafe { WaitForSingleObject(self.0, 0) } {
+            WAIT_OBJECT_0 => Ok(true),
+            WAIT_TIMEOUT => Ok(false),
+            WAIT_FAILED => Err(format!(
+                "could not inspect the Guardian stop signal (Windows error {})",
+                unsafe { GetLastError() }
+            )),
+            _ => Err("Windows returned an unexpected stop-signal result".into()),
+        }
+    }
+
+    fn request_stop_named(name: &[u16], sid: &str) -> Result<bool, String> {
+        let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE | READ_CONTROL, 0, name.as_ptr()) };
+        if handle.is_null() || handle as isize == -1 {
+            let error = unsafe { GetLastError() };
+            if error == ERROR_FILE_NOT_FOUND {
+                Ok(false)
+            } else {
+                Err(format!(
+                    "could not access the Guardian stop signal (Windows error {error})"
+                ))
+            }
+        } else {
+            let event = Self(handle);
+            if !matches!(stop_event_security_matches(event.0, sid), Ok(true)) {
+                return Err(
+                    "Guardian stop signal has unexpected ownership or access rules; refusing to use it"
+                        .into(),
+                );
+            }
+            if unsafe { SetEvent(event.0) } == 0 {
+                return Err(format!(
+                    "could not signal Guardian to stop (Windows error {})",
+                    unsafe { GetLastError() }
+                ));
+            }
+            Ok(true)
+        }
+    }
+}
+
+impl Drop for StopEvent {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+struct StartupEvent {
+    handle: Handle,
+    name: String,
+}
+
+impl StartupEvent {
+    fn create() -> Result<Self, String> {
+        let (_, sid) = stop_event_identity()?;
+        for _ in 0..3 {
+            let name = format!("Local\\AgentGuardian.Startup.{}", LeaseId::new_v4());
+            let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+            let descriptor = SecurityDescriptor::for_user(&sid)?;
+            let attributes = SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: descriptor.0.0,
+                bInheritHandle: 0,
+            };
+            unsafe { SetLastError(0) };
+            let handle = unsafe {
+                CreateEventExW(
+                    &attributes,
+                    wide_name.as_ptr(),
+                    CREATE_EVENT_MANUAL_RESET,
+                    STOP_EVENT_ACCESS,
+                )
+            };
+            if handle.is_null() || handle as isize == -1 {
+                return Err(format!(
+                    "could not create the background startup signal (Windows error {})",
+                    unsafe { GetLastError() }
+                ));
+            }
+            if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+                unsafe { CloseHandle(handle) };
+                continue;
+            }
+            if !matches!(stop_event_security_matches(handle, &sid), Ok(true)) {
+                unsafe { CloseHandle(handle) };
+                return Err(
+                    "background startup signal has unexpected ownership or access rules".into(),
+                );
+            }
+            return Ok(Self { handle, name });
+        }
+        Err("could not create a unique background startup signal".into())
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl Drop for StartupEvent {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.handle);
+        }
+    }
+}
+
+fn signal_startup_event(name: Option<&str>) -> Result<(), String> {
+    let Some(name) = name else {
+        return Ok(());
+    };
+    let suffix = name
+        .strip_prefix("Local\\AgentGuardian.Startup.")
+        .ok_or_else(|| "invalid background startup signal".to_string())?;
+    if suffix.len() != 36
+        || !suffix
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() || character == '-')
+    {
+        return Err("invalid background startup signal".into());
+    }
+    let (_, sid) = stop_event_identity()?;
+    let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    let handle = unsafe { OpenEventW(EVENT_MODIFY_STATE | READ_CONTROL, 0, wide_name.as_ptr()) };
+    if handle.is_null() || handle as isize == -1 {
+        return Err(format!(
+            "could not open the background startup signal (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    let event = StartupSignalHandle(handle);
+    if !matches!(stop_event_security_matches(event.0, &sid), Ok(true)) {
+        return Err("background startup signal has unexpected ownership or access rules".into());
+    }
+    if unsafe { SetEvent(event.0) } == 0 {
+        return Err(format!(
+            "could not signal background startup readiness (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    Ok(())
+}
+
+struct StartupSignalHandle(Handle);
+
+impl Drop for StartupSignalHandle {
+    fn drop(&mut self) {
+        unsafe {
+            CloseHandle(self.0);
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LeaseWait {
+    TargetExited,
+    StopRequested,
+    Timeout,
+}
+
+fn wait_for_target_or_stop(
+    process: &ProcessHandle,
+    stop_event: &StopEvent,
+    timeout_ms: u32,
+) -> Result<LeaseWait, String> {
+    let handles = [process.0, stop_event.0];
+    match unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, timeout_ms) } {
+        WAIT_OBJECT_0 => Ok(LeaseWait::TargetExited),
+        value if value == WAIT_OBJECT_0 + 1 => Ok(LeaseWait::StopRequested),
+        WAIT_TIMEOUT => Ok(LeaseWait::Timeout),
+        WAIT_FAILED => Err(format!(
+            "could not wait for the target process or stop request (Windows error {})",
+            unsafe { GetLastError() }
+        )),
+        _ => Err("Windows returned an unexpected lease wait result".into()),
+    }
+}
+
+#[cfg(test)]
+mod stop_event_tests {
+    use super::*;
+
+    fn unique_name() -> Vec<u16> {
+        format!("Local\\AgentGuardian.StopTest.{}", LeaseId::new_v4())
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect()
+    }
+
+    #[test]
+    fn event_name_is_stable_per_user_and_session_without_exposing_sid() {
+        let sid = "S-1-5-21-123-456-789-1001";
+        let first = stop_event_name_for(7, sid);
+        assert_eq!(first, stop_event_name_for(7, sid));
+        assert_ne!(first, stop_event_name_for(8, sid));
+        assert_ne!(first, stop_event_name_for(7, "S-1-5-21-987-654-321-1002"));
+        assert!(first.starts_with("Local\\AgentGuardian.Stop.7."));
+        assert!(!first.contains(sid));
+    }
+
+    #[test]
+    fn user_stop_signal_wakes_lease_wait_without_power_api() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = unique_name();
+        let event = StopEvent::create_named(&name, &sid).unwrap();
+        let second_handle = StopEvent::create_named(&name, &sid).unwrap();
+        assert!(StopEvent::request_stop_named(&name, &sid).unwrap());
+        let current_process = ProcessHandle::open(unsafe { GetCurrentProcessId() })
+            .unwrap()
+            .0;
+        let wait_handles = [current_process.0, event.0];
+        assert_eq!(
+            unsafe { WaitForMultipleObjects(2, wait_handles.as_ptr(), 0, 0) },
+            WAIT_OBJECT_0 + 1
+        );
+        assert!(StopEvent::request_stop_named(&name, &sid).unwrap());
+        drop(second_handle);
+        drop(event);
+        assert!(!StopEvent::request_stop_named(&name, &sid).unwrap());
+    }
+
+    #[test]
+    fn precreated_stop_event_with_broad_acl_is_rejected() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = unique_name();
+        let descriptor = SecurityDescriptor::from_sddl("D:P(A;;GA;;;WD)").unwrap();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        let handle = unsafe {
+            CreateEventExW(
+                &attributes,
+                name.as_ptr(),
+                CREATE_EVENT_MANUAL_RESET,
+                STOP_EVENT_ACCESS,
+            )
+        };
+        assert!(!handle.is_null() && handle as isize != -1);
+        let event = StopEvent(handle);
+
+        assert!(StopEvent::create_named(&name, &sid).is_err());
+        assert!(StopEvent::request_stop_named(&name, &sid).is_err());
+        assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_TIMEOUT);
+    }
+
+    #[test]
+    fn background_startup_event_signals_only_after_worker_initialization() {
+        let event = StartupEvent::create().unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(event.handle, 0) },
+            WAIT_TIMEOUT
+        );
+        signal_startup_event(Some(event.name())).unwrap();
+        assert_eq!(
+            unsafe { WaitForSingleObject(event.handle, 0) },
+            WAIT_OBJECT_0
+        );
+    }
+
+    #[test]
+    fn invalid_background_startup_event_is_rejected() {
+        assert!(signal_startup_event(Some("Global\\AgentGuardian.Startup.invalid")).is_err());
+    }
+
+    #[test]
+    fn background_startup_signal_rejects_a_broad_acl() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = format!("Local\\AgentGuardian.Startup.{}", LeaseId::new_v4());
+        let wide_name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+        let descriptor = SecurityDescriptor::from_sddl(&format!("O:{sid}D:P(A;;GA;;;WD)")).unwrap();
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0.0,
+            bInheritHandle: 0,
+        };
+        let handle = unsafe {
+            CreateEventExW(
+                &attributes,
+                wide_name.as_ptr(),
+                CREATE_EVENT_MANUAL_RESET,
+                STOP_EVENT_ACCESS,
+            )
+        };
+        assert!(!handle.is_null() && handle as isize != -1);
+        let event = StartupSignalHandle(handle);
+
+        assert!(signal_startup_event(Some(&name)).is_err());
+        assert_eq!(unsafe { WaitForSingleObject(event.0, 0) }, WAIT_TIMEOUT);
     }
 }
 
@@ -242,14 +1063,80 @@ impl Drop for ActiveLease {
     }
 }
 
+pub struct TargetProcess {
+    pub pid: Option<u32>,
+    pub creation_time_100ns: Option<u64>,
+}
+
 pub fn start(
-    pid: Option<u32>,
+    target: TargetProcess,
     ttl_minutes: u32,
-    allow_battery: bool,
+    background: bool,
+    auto_reconnect_saved_wifi: bool,
     config: Config,
+    config_path: Option<PathBuf>,
+    startup_event: Option<&str>,
 ) -> Result<(), String> {
+    let TargetProcess {
+        pid,
+        creation_time_100ns: target_creation_time,
+    } = target;
+    let allow_battery = config.power.allow_on_battery;
+    if background {
+        if target_creation_time.is_some() {
+            return Err("target process identity is only accepted by the detached worker".into());
+        }
+        let expected_target_creation_time = if let Some(pid) = pid {
+            let (process, creation_time) = ProcessHandle::open(pid)?;
+            if process.wait(0)? {
+                return Err(format!("process {pid} has already exited"));
+            }
+            Some(creation_time)
+        } else {
+            None
+        };
+        if !allow_battery && power_status()?.ac_line_status != 1 {
+            return Err("AC power could not be confirmed. Connect AC or pass --allow-battery for a bounded lease.".into());
+        }
+        let mut arguments = vec![
+            OsString::from("start"),
+            OsString::from("--ttl-minutes"),
+            OsString::from(ttl_minutes.to_string()),
+        ];
+        if let Some(pid) = pid {
+            arguments.push(OsString::from("--pid"));
+            arguments.push(OsString::from(pid.to_string()));
+            let creation_time = expected_target_creation_time.ok_or_else(|| {
+                "could not capture target process identity before detached startup".to_string()
+            })?;
+            arguments.push(OsString::from("--target-creation-time"));
+            arguments.push(OsString::from(creation_time.to_string()));
+        }
+        if allow_battery {
+            arguments.push(OsString::from("--allow-battery"));
+        }
+        if auto_reconnect_saved_wifi {
+            arguments.push(OsString::from("--auto-reconnect-saved-wifi"));
+        }
+        if let Some(path) = config_path.as_deref() {
+            arguments.push(OsString::from("--config"));
+            arguments.push(path.as_os_str().to_os_string());
+        }
+        spawn_detached(&arguments, "power lease")?;
+        if auto_reconnect_saved_wifi {
+            println!(
+                "Automatic saved-profile Wi-Fi reconnect is enabled for this bounded lease (up to three attempts with backoff)."
+            );
+        }
+        return Ok(());
+    }
+
     let process_id = pid.unwrap_or_else(|| unsafe { GetCurrentProcessId() });
     let (process, creation_time) = ProcessHandle::open(process_id)?;
+    if startup_event.is_some() && pid.is_some() && target_creation_time.is_none() {
+        return Err("detached target process identity was not supplied".into());
+    }
+    validate_target_creation_time(process_id, target_creation_time, creation_time)?;
     if process.wait(0)? {
         return Err(format!("process {process_id} has already exited"));
     }
@@ -286,6 +1173,7 @@ pub fn start(
         .acquire(identity, started_at, expires_at)
         .map_err(|error| error.to_string())?;
 
+    let stop_event = StopEvent::create()?;
     let event_store = event_store(&config)?;
     event_store.prepare()?;
     let reason = format!("Agent Guardian lease for PID {process_id}");
@@ -293,6 +1181,24 @@ pub fn start(
     let session_id = LeaseId::new_v4();
     event_store.append(&SessionEvent::lease_started(session_id, unix_time_ms()))?;
     let active_lease = ActiveLease::new(power_lease, event_store, session_id);
+    if auto_reconnect_saved_wifi {
+        let mut arguments = vec![
+            OsString::from("monitor"),
+            OsString::from("--guardian-pid"),
+            OsString::from(unsafe { GetCurrentProcessId() }.to_string()),
+            OsString::from("--duration-minutes"),
+            OsString::from(ttl_minutes.to_string()),
+            OsString::from("--interval-seconds"),
+            OsString::from("300"),
+            OsString::from("--auto-reconnect-saved-wifi"),
+        ];
+        if let Some(path) = config_path.as_deref() {
+            arguments.push(OsString::from("--config"));
+            arguments.push(path.as_os_str().to_os_string());
+        }
+        spawn_detached(&arguments, "Wi-Fi monitor")?;
+    }
+    signal_startup_event(startup_event)?;
     println!("Power request active for PID {process_id} (lease {lease_id}).");
     println!(
         "The display remains eligible to turn off. Explicit Sleep, Shutdown, Restart, or critical battery behavior remains under Windows control."
@@ -304,7 +1210,7 @@ pub fn start(
         );
     } else {
         println!(
-            "AC power confirmed. Lease expires in {} minute(s). Press Ctrl+C or wait for the target process to exit.",
+            "AC power confirmed. Lease expires in {} minute(s). Use guardian stop, Ctrl+C, or wait for the target process to exit.",
             initial_duration.as_secs() / 60
         );
     }
@@ -313,11 +1219,20 @@ pub fn start(
         let elapsed_ms = started.elapsed().as_millis() as u64;
         let remaining = Duration::from_millis(policy.deadline_ms().saturating_sub(elapsed_ms));
         let wait_for = remaining.min(POWER_POLL_INTERVAL);
-        if process.wait(wait_for.as_millis().max(1) as u32)? {
-            let _ = leases.reap(unix_time_ms(), |_| false);
-            println!("Target process exited; releasing the power request.");
-            active_lease.finish(ReleaseReason::TargetExited)?;
-            return Ok(());
+        match wait_for_target_or_stop(&process, &stop_event, wait_for.as_millis().max(1) as u32)? {
+            LeaseWait::TargetExited => {
+                let _ = leases.reap(unix_time_ms(), |_| false);
+                println!("Target process exited; releasing the power request.");
+                active_lease.finish(ReleaseReason::TargetExited)?;
+                return Ok(());
+            }
+            LeaseWait::StopRequested => {
+                let _ = leases.reap(unix_time_ms(), |_| false);
+                println!("Stop requested; releasing the power request.");
+                active_lease.finish(ReleaseReason::UserRequestedStop)?;
+                return Ok(());
+            }
+            LeaseWait::Timeout => {}
         }
 
         let power_source = if power_status()?.ac_line_status == 1 {
@@ -352,12 +1267,29 @@ pub fn start(
     Ok(())
 }
 
-pub fn install(json: bool, expected_sha256: &str) -> Result<(), String> {
+fn validate_target_creation_time(
+    process_id: u32,
+    expected_creation_time: Option<u64>,
+    actual_creation_time: u64,
+) -> Result<(), String> {
+    if expected_creation_time.is_some_and(|expected| expected != actual_creation_time) {
+        return Err(format!(
+            "target process {process_id} changed before the detached lease started"
+        ));
+    }
+    Ok(())
+}
+
+pub fn install(json: bool, expected_sha256: Option<&str>) -> Result<(), String> {
     install::install(json, expected_sha256)
 }
 
 pub fn uninstall(json: bool) -> Result<(), String> {
     install::uninstall(json)
+}
+
+pub fn stop(json: bool) -> Result<(), String> {
+    StopEvent::request_stop(json)
 }
 
 fn unix_time_ms() -> u64 {
@@ -389,26 +1321,39 @@ fn event_store_at(config: &Config, filename: &str) -> Result<EventStore, String>
 
 pub fn powercfg(arguments: &[&str]) -> Result<String, String> {
     let executable = system_directory()?.join("powercfg.exe");
+    if arguments == ["/requests"] {
+        let status = Command::new(&executable)
+            .args(arguments)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map_err(|error| format!("could not run {}: {error}", executable.display()))?;
+        if !status.success() {
+            return Err(format!(
+                "powercfg {} exited with {} (command output suppressed)",
+                arguments.join(" "),
+                status
+            ));
+        }
+        return Ok(redacted_power_request_output().into());
+    }
+
     let output = Command::new(&executable)
         .args(arguments)
         .output()
         .map_err(|error| format!("could not run {}: {error}", executable.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     if !output.status.success() {
-        let detail = if stderr.trim().is_empty() {
-            stdout.trim()
-        } else {
-            stderr.trim()
-        };
         return Err(format!(
-            "powercfg {} exited with {}: {}",
+            "powercfg {} exited with {} (command output suppressed)",
             arguments.join(" "),
-            output.status,
-            detail
+            output.status
         ));
     }
-    Ok(stdout.into_owned())
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn redacted_power_request_output() -> &'static str {
+    "Power request query completed; requestor details were redacted.\n"
 }
 
 fn system_directory() -> Result<PathBuf, String> {
@@ -445,10 +1390,11 @@ pub fn doctor(json: bool) -> Result<(), String> {
             "power_source": power_source,
             "battery_percent": (power.battery_life_percent != 255).then_some(power.battery_life_percent),
             "available_sleep_states": available_sleep_states.as_ref().ok(),
-            "active_power_requests": active_requests.as_ref().ok(),
+            "power_request_query_available": active_requests.is_ok(),
+            "power_request_details_redacted": true,
             "diagnostic_warnings": warnings,
             "locked_session_verified": false,
-            "network_recovery_enabled": false
+            "automatic_saved_profile_reconnect_default": false
         });
         println!(
             "{}",
@@ -468,14 +1414,15 @@ pub fn doctor(json: bool) -> Result<(), String> {
             Err(error) => println!("Unavailable: {error}"),
         }
         println!();
-        println!("Active power requests (powercfg /requests):");
+        println!("Active power request diagnostics (powercfg /requests):");
         match &active_requests {
             Ok(output) => print!("{output}"),
             Err(error) => println!("Unavailable: {error}"),
         }
         println!("Locked-session behavior: not verified on this device.");
-        println!("Automatic network recovery: disabled.");
-        println!("A one-shot saved-profile reconnect requires an explicit network command option.");
+        println!(
+            "Automatic saved-profile Wi-Fi reconnect: opt-in via guardian start --auto-reconnect-saved-wifi or guardian monitor --auto-reconnect-saved-wifi."
+        );
     }
     Ok(())
 }
@@ -649,8 +1596,100 @@ pub fn network(
     Ok(())
 }
 
-pub fn monitor(json: bool, duration_minutes: u32, interval_seconds: u32) -> Result<(), String> {
-    monitor::run(json, duration_minutes, interval_seconds)
+pub fn monitor(
+    json: bool,
+    guardian_pid: Option<u32>,
+    duration_minutes: u32,
+    interval_seconds: u32,
+    auto_reconnect_saved_wifi: bool,
+    config: Config,
+    startup_event: Option<&str>,
+) -> Result<(), String> {
+    monitor::run(
+        json,
+        guardian_pid,
+        duration_minutes,
+        interval_seconds,
+        auto_reconnect_saved_wifi,
+        config,
+        startup_event,
+    )
+}
+
+fn spawn_detached(arguments: &[OsString], purpose: &str) -> Result<(), String> {
+    let executable = std::env::current_exe()
+        .map_err(|error| format!("could not locate the Guardian executable: {error}"))?;
+    let startup_event = StartupEvent::create()?;
+    let mut worker_arguments = vec![
+        OsString::from("--startup-event"),
+        OsString::from(startup_event.name()),
+    ];
+    worker_arguments.extend_from_slice(arguments);
+    let mut child = Command::new(&executable)
+        .args(worker_arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
+        .spawn()
+        .map_err(|error| format!("could not start the background {purpose}: {error}"))?;
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match unsafe { WaitForSingleObject(startup_event.handle, 100) } {
+            WAIT_OBJECT_0 => {
+                println!(
+                    "Started background {purpose} (process {}) and confirmed it is ready.",
+                    child.id()
+                );
+                return Ok(());
+            }
+            WAIT_TIMEOUT => {}
+            WAIT_FAILED => {
+                let error = unsafe { GetLastError() };
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "could not wait for the background {purpose} to become ready (Windows error {error})"
+                ));
+            }
+            _ => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "Windows returned an unexpected readiness result for the background {purpose}"
+                ));
+            }
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Err(format!(
+                    "background {purpose} exited before confirming readiness ({status}); run the equivalent foreground command to see its startup diagnostic"
+                ));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "could not inspect background {purpose} startup: {error}"
+                ));
+            }
+        }
+        if Instant::now() >= deadline {
+            let cleanup = match child.kill() {
+                Ok(()) => child.wait().map(|_| ()).map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            return Err(match cleanup {
+                Ok(()) => format!(
+                    "background {purpose} did not confirm readiness within 15 seconds; the worker was stopped"
+                ),
+                Err(error) => format!(
+                    "background {purpose} did not confirm readiness within 15 seconds and worker cleanup failed: {error}"
+                ),
+            });
+        }
+    }
 }
 
 pub fn logs(json: bool, config: Config) -> Result<(), String> {
@@ -803,6 +1842,7 @@ fn release_label(reason: ReleaseReason) -> &'static str {
         ReleaseReason::BatteryTransition => "Power lease released after battery transition",
         ReleaseReason::RuntimeError => "Power lease released after runtime error",
         ReleaseReason::RuntimeExit => "Power lease released when runtime exited",
+        ReleaseReason::UserRequestedStop => "Power lease released after user stop request",
     }
 }
 
@@ -827,21 +1867,75 @@ struct LocalNetworkSnapshot {
 }
 
 fn local_network_snapshot() -> Result<LocalNetworkSnapshot, String> {
-    let adapters = get_adapter_addresses()?;
-    let observations = adapters.iter().map(|adapter| LocalAdapterObservation {
-        is_wifi: adapter.IfType == IF_TYPE_IEEE80211,
-        is_tunnel: adapter.IfType == IF_TYPE_TUNNEL,
-        operational: adapter.OperStatus == IfOperStatusUp,
-        default_gateway_reported: !adapter.FirstGatewayAddress.is_null(),
-    });
     let snapshot = LocalNetworkSnapshot {
-        summary: LocalNetworkSummary::from_adapters(observations),
+        summary: LocalNetworkSummary::from_adapters(get_adapter_observations()?),
         ..LocalNetworkSnapshot::default()
     };
     Ok(snapshot)
 }
 
-fn get_adapter_addresses() -> Result<Vec<IP_ADAPTER_ADDRESSES_LH>, String> {
+fn adapter_observations(
+    buffer: &[IP_ADAPTER_ADDRESSES_LH],
+) -> Result<Vec<LocalAdapterObservation>, String> {
+    if buffer.is_empty() {
+        return Ok(Vec::new());
+    }
+    let base = buffer.as_ptr() as usize;
+    let buffer_bytes = buffer
+        .len()
+        .checked_mul(std::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>())
+        .ok_or_else(|| "network adapter buffer size overflowed".to_string())?;
+    let end = base
+        .checked_add(buffer_bytes)
+        .ok_or_else(|| "network adapter buffer address overflowed".to_string())?;
+    let mut current = buffer.as_ptr();
+    let mut observations = Vec::new();
+    let mut visited = 0_usize;
+    let minimum_length = std::mem::offset_of!(IP_ADAPTER_ADDRESSES_LH, FirstGatewayAddress)
+        + std::mem::size_of::<*mut c_void>();
+    let maximum_nodes = buffer_bytes / minimum_length;
+
+    while !current.is_null() {
+        let address = current as usize;
+        if address < base
+            || address
+                .checked_add(minimum_length)
+                .is_none_or(|minimum_end| minimum_end > end)
+            || !(address - base).is_multiple_of(std::mem::align_of::<IP_ADAPTER_ADDRESSES_LH>())
+        {
+            return Err("Windows returned an invalid network adapter list pointer".into());
+        }
+
+        let length =
+            unsafe { std::ptr::addr_of!((*current).Anonymous1.Anonymous.Length).read() } as usize;
+        if length < minimum_length
+            || address
+                .checked_add(length)
+                .is_none_or(|node_end| node_end > end)
+        {
+            return Err("Windows returned an incomplete network adapter record".into());
+        }
+        let if_type = unsafe { std::ptr::addr_of!((*current).IfType).read() };
+        let operational_status = unsafe { std::ptr::addr_of!((*current).OperStatus).read() };
+        let has_default_gateway =
+            !unsafe { std::ptr::addr_of!((*current).FirstGatewayAddress).read() }.is_null();
+        observations.push(LocalAdapterObservation {
+            is_wifi: if_type == IF_TYPE_IEEE80211,
+            is_tunnel: if_type == IF_TYPE_TUNNEL,
+            operational: operational_status == IfOperStatusUp,
+            default_gateway_reported: has_default_gateway,
+        });
+        current = unsafe { std::ptr::addr_of!((*current).Next).read() };
+        visited += 1;
+        if visited > maximum_nodes {
+            return Err("Windows returned a cyclic network adapter list".into());
+        }
+    }
+
+    Ok(observations)
+}
+
+fn get_adapter_observations() -> Result<Vec<LocalAdapterObservation>, String> {
     let flags = GAA_FLAG_INCLUDE_GATEWAYS
         | GAA_FLAG_SKIP_ANYCAST
         | GAA_FLAG_SKIP_DNS_SERVER
@@ -868,7 +1962,7 @@ fn get_adapter_addresses() -> Result<Vec<IP_ADAPTER_ADDRESSES_LH>, String> {
             )
         };
         if result == 0 {
-            return Ok(adapters);
+            return adapter_observations(&adapters);
         }
         if result == ERROR_NO_DATA {
             return Ok(Vec::new());
@@ -915,6 +2009,102 @@ fn gateway_label(reachable: Option<bool>) -> &'static str {
         Some(true) => "confirmed",
         Some(false) => "unreachable",
         None => "not confirmed (ICMP may be filtered)",
+    }
+}
+
+#[cfg(test)]
+mod windows_safety_tests {
+    use super::*;
+
+    fn adapter_record() -> IP_ADAPTER_ADDRESSES_LH {
+        let mut adapter = IP_ADAPTER_ADDRESSES_LH::default();
+        adapter.Anonymous1.Anonymous.Length = std::mem::size_of::<IP_ADAPTER_ADDRESSES_LH>() as u32;
+        adapter
+    }
+
+    #[test]
+    fn power_request_diagnostic_discards_owner_details() {
+        let message = redacted_power_request_output();
+        assert!(message.contains("redacted"));
+        assert!(!message.contains("PID"));
+        assert!(!message.contains("C:\\Users\\"));
+    }
+
+    #[test]
+    fn adapter_summary_follows_only_linked_records() {
+        let mut adapters = vec![adapter_record(), adapter_record(), adapter_record()];
+        adapters[0].IfType = IF_TYPE_IEEE80211;
+        adapters[0].OperStatus = IfOperStatusUp;
+        adapters[0].FirstGatewayAddress = std::ptr::NonNull::<
+            windows_sys::Win32::NetworkManagement::IpHelper::IP_ADAPTER_GATEWAY_ADDRESS_LH,
+        >::dangling()
+        .as_ptr();
+        adapters[1].IfType = IF_TYPE_IEEE80211;
+        adapters[1].OperStatus = IfOperStatusUp;
+        unsafe {
+            let base = adapters.as_mut_ptr();
+            (*base).Next = base.add(2);
+            (*base.add(2)).Next = std::ptr::null_mut();
+        }
+
+        let observations = adapter_observations(&adapters).unwrap();
+        assert_eq!(observations.len(), 2);
+        assert!(observations[0].is_wifi);
+        assert!(observations[0].operational);
+        assert!(observations[0].default_gateway_reported);
+        assert!(!observations[1].is_wifi);
+    }
+
+    #[test]
+    fn adapter_summary_rejects_invalid_and_cyclic_links() {
+        let mut adapter = adapter_record();
+        let adapter_ptr = &mut adapter as *mut IP_ADAPTER_ADDRESSES_LH;
+        unsafe {
+            (*adapter_ptr).Next = std::ptr::NonNull::<IP_ADAPTER_ADDRESSES_LH>::dangling().as_ptr();
+        }
+        assert!(adapter_observations(std::slice::from_ref(&adapter)).is_err());
+
+        let mut adapters = vec![adapter_record()];
+        adapters[0].Next = adapters.as_mut_ptr();
+        assert!(adapter_observations(&adapters).is_err());
+    }
+
+    #[test]
+    fn target_process_must_share_current_owner_and_session() {
+        assert!(validate_process_context(true, 7, 7).is_ok());
+        assert!(validate_process_context(false, 7, 7).is_err());
+        assert!(validate_process_context(true, 8, 7).is_err());
+    }
+
+    #[test]
+    fn current_process_context_can_be_verified() {
+        let process_id = unsafe { GetCurrentProcessId() };
+        assert!(ProcessHandle::open(process_id).is_ok());
+    }
+
+    #[test]
+    fn detached_target_creation_identity_must_match() {
+        assert!(validate_target_creation_time(12, Some(34), 34).is_ok());
+        assert!(validate_target_creation_time(12, None, 34).is_ok());
+        assert!(validate_target_creation_time(12, Some(33), 34).is_err());
+    }
+
+    #[test]
+    fn automatic_reconnect_monitor_lease_is_singleton_and_released_cleanly() {
+        let (_, sid) = stop_event_identity().unwrap();
+        let name = format!(
+            "Local\\AgentGuardian.AutoReconnect.Test.{}",
+            LeaseId::new_v4()
+        );
+        let wide_name = name
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect::<Vec<_>>();
+
+        let lease = AutoReconnectMonitorLease::create_named(&wide_name, &sid).unwrap();
+        assert!(AutoReconnectMonitorLease::create_named(&wide_name, &sid).is_err());
+        drop(lease);
+        assert!(AutoReconnectMonitorLease::create_named(&wide_name, &sid).is_ok());
     }
 }
 

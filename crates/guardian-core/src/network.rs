@@ -209,7 +209,7 @@ pub fn classify_local_evidence(
 ) -> ConnectivityState {
     let wifi_connected = if summary.wifi_adapter_operational {
         Some(true)
-    } else if summary.wifi_adapters_detected && summary.operational_adapter_count == 0 {
+    } else if summary.wifi_adapters_detected {
         Some(false)
     } else {
         None
@@ -581,7 +581,7 @@ mod tests {
     }
 
     #[test]
-    fn inactive_wifi_does_not_override_an_operational_wired_route() {
+    fn wifi_state_uses_wifi_operational_flag_not_total_adapter_count() {
         let summary = LocalNetworkSummary {
             wifi_adapters_detected: true,
             operational_adapter_count: 1,
@@ -592,7 +592,7 @@ mod tests {
         };
         assert_eq!(
             classify_local_observation(&summary, &two_independent(true), false),
-            ConnectivityState::Suspect
+            ConnectivityState::WifiDisconnected
         );
     }
 

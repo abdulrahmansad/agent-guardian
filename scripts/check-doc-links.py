@@ -40,7 +40,12 @@ def check_file(markdown_file: Path) -> list[str]:
 
 
 def main() -> int:
-    markdown_files = sorted(path for path in ROOT.rglob("*.md") if ".git" not in path.parts and "target" not in path.parts)
+    generated_directories = {".git", "target", "dist"}
+    markdown_files = sorted(
+        path
+        for path in ROOT.rglob("*.md")
+        if not generated_directories.intersection(path.parts)
+    )
     errors = [error for markdown_file in markdown_files for error in check_file(markdown_file)]
     if errors:
         print("\n".join(errors), file=sys.stderr)

@@ -13,13 +13,17 @@ This repository provides skills/agent-guardian/SKILL.md, a concise instruction f
 
 ## Commands
 
-When this repository has a published default branch, install the skill with:
+Install the skill from the public GitHub repository with:
 
     npx skills add abdulrahmansad/agent-guardian
 
 To select Codex explicitly and suppress interactive prompts:
 
     npx skills add abdulrahmansad/agent-guardian --skill agent-guardian --agent codex --yes
+
+Remove the project-scoped installation with:
+
+    npx skills remove agent-guardian --yes
 
 For local discovery without installation:
 
@@ -33,4 +37,4 @@ The reference validator checks package metadata and naming. It does not validate
 
 ## Current validation limits
 
-The official skills-ref validator reports the local package as valid. The Vercel Skills CLI local-list command discovers exactly one skill named agent-guardian. Public GitHub installation cannot be verified while the configured remote has no refs. A published repository and a clean Codex install/uninstall environment are required for end-to-end validation.
+The official skills-ref validator reports the local package as valid. The Vercel Skills CLI local-list command discovers exactly one skill named agent-guardian. On 2026-10-19, the public GitHub package was copied into a disposable Codex project, listed successfully, removed with the project-scoped removal command, and then returned an empty project skill list. This verifies skill discovery and file installation/removal only; it does not install or validate the Windows runtime or an agent's end-to-end use of it.
