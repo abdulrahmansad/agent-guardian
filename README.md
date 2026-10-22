@@ -4,7 +4,7 @@
 
 Agent Guardian is an early-stage Windows project for protecting long-running local AI coding sessions from idle sleep and transient connectivity failures. It combines a portable Agent Skill, an independent Rust runtime, and a conservative Windows integration.
 
-The repository contains an experimental Windows runtime with bounded foreground or detached power leases, a same-user stop command, a local network monitor, explicit one-shot diagnostics, optional bounded saved-profile Wi-Fi reconnection, local event storage and reports, and a per-user installer. Detached start waits for the worker to confirm that its power request is active (and, when requested, that its monitor initialized). The Agent Skill is publicly discoverable and its Codex project installation has been verified in a disposable project. Two controlled live tests on 2026-10-22 passed: Guardian's monitor detected the Wi-Fi disconnect, reused the captured saved profile, confirmed association, and restored the default route and independent DNS/TCP connectivity before fallback. A separate 17-minute AC idle-window test with a dummy target held a 20-minute lease without a sleep event; display-off, post-release sleep, an official runtime release, and end-to-end agent runtime integration remain unverified. Do not rely on this development build for unattended production work.
+The repository contains an experimental Windows runtime with bounded foreground or detached power leases, a same-user stop command, a local network monitor, explicit one-shot diagnostics, optional bounded saved-profile Wi-Fi reconnection, local event storage and reports, and a per-user installer. Detached start waits for the worker to confirm that its power request is active (and, when requested, that its monitor initialized). The Agent Skill is publicly discoverable and its Codex project installation has been verified in a disposable project. Two controlled live tests on 2026-10-22 passed: Guardian's monitor detected the Wi-Fi disconnect, reused the captured saved profile, confirmed association, and restored the default route and independent DNS/TCP connectivity before fallback. A separate 17-minute AC idle-window test with a dummy target held a 20-minute lease without a sleep event, and the system then slept on its normal 15-minute idle timer after release; display-off, an official runtime release, and end-to-end agent runtime integration remain unverified. Do not rely on this development build for unattended production work.
 
 ## The use case
 
@@ -71,7 +71,7 @@ Replace 1234 with the process ID. Guardian refuses targets owned by another Wind
 
 | Platform | Status |
 |---|---|
-| Windows 11 x64 | Development target; source and installer file operations are tested on Windows 11 x64. One 17-minute AC idle test held a power lease without sleep; display-off, post-release sleep, and locked-session behavior have not been hardware-validated. |
+| Windows 11 x64 | Development target; source and installer file operations are tested on Windows 11 x64. One 17-minute AC idle test held a power lease without sleep, and the system slept normally on its 15-minute idle timer after release; display-off and locked-session behavior have not been hardware-validated. |
 | Windows 10 x64 | Not tested |
 | Windows ARM64 | Not tested |
 | macOS / Linux | Core design is platform-independent; runtime is unsupported |
@@ -175,7 +175,7 @@ Install Rust 1.89 or newer with Cargo, rustfmt, and Clippy. The current workspac
     python scripts/check-doc-links.py
     cargo run -p guardian-cli -- doctor
 
-Windows power and hardware behavior require Windows validation. Idle sleep prevention passed one 17-minute AC test with a dummy target; display-off, post-release sleep, and locked-session scenarios remain untested. Two controlled live Wi-Fi recovery tests passed for Guardian on 2026-10-22; broader hardware coverage remains incomplete. See the [acceptance matrix](docs/testing/acceptance.md). Use `cargo run -p guardian-cli -- --help` to inspect the current CLI.
+Windows power and hardware behavior require Windows validation. Idle sleep prevention passed one 17-minute AC test with a dummy target, and normal post-release sleep returned on the 15-minute idle timer; display-off and locked-session scenarios remain untested. Two controlled live Wi-Fi recovery tests passed for Guardian on 2026-10-22; broader hardware coverage remains incomplete. See the [acceptance matrix](docs/testing/acceptance.md). Use `cargo run -p guardian-cli -- --help` to inspect the current CLI.
 
 ## License
 
